@@ -1,0 +1,9 @@
+# Simulation build artifacts
+*.vvp
+*.vcd
+
+# Editor and OS files
+*.swp
+*.swo
+*~
+.DS_Store
