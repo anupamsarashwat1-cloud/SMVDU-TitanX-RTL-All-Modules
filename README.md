@@ -511,10 +511,16 @@ rtl_verification_handoff/
 
 ---
 
-*SMVDU TITAN-X SoC — Designed for SCL 180nm ASIC Tapeout*
+## 🚀 Way Forward: RTL to Linux on FPGA
+
+The complete detailed plan for the next stages (Phase 1-5) has been outlined in `implementation_plan.md` to achieve the following:
+
+1. **Deep Manual Verification:** Extracting waveform VCDs to visually trace instruction execution and SV39 Page Table walks via GTKWave.
+2. **Bare-Metal Toolchain:** Creating Linker scripts, configuring the RISC-V 64-bit GCC toolchain, and compiling a C-based Boot ROM payload.
+3. **FPGA Synthesis:** Porting to a physical Xilinx FPGA board, writing XDC constraints, replacing the DDR BFM with a physical MIG (Memory Interface Generator), and generating the `.bit` bitstream.
+4. **Linux Firmware Stack:** Developing the Device Tree Blob (DTB), compiling OpenSBI (Supervisor Binary Interface) for M-Mode traps, and porting U-Boot as the bootloader.
+5. **Linux Kernel Porting:** Building a custom Linux 6.x Kernel configured for RV64GC with the specific 16550 UART and Framebuffer drivers, along with a BusyBox root filesystem, and successfully booting Linux on the physical FPGA.
 
 ---
 
 *SMVDU TITAN-X SoC — Designed for SCL 180nm ASIC Tapeout*
-
----
