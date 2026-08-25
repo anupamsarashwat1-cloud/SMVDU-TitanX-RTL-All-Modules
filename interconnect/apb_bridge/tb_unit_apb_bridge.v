@@ -104,6 +104,30 @@ module tb_unit_apb_bridge;
 
     assign prdata = mem[paddr[9:2]];
 
+    // ---------------- forensics: who committed what, who handshook when ----
+`ifdef TB_APB_TRACE
+    always @(posedge clk) begin
+        if (awvalid && awready) $display("[AXI] %0t AW %h", $time, awaddr);
+        if (wvalid  && wready)  $display("[AXI] %0t W  %h", $time, wdata);
+        if (arvalid && arready) $display("[AXI] %0t AR %h", $time, araddr);
+    end
+    always @(posedge clk) begin
+        if (u_dut.state == u_dut.SETUP)
+            $display("[APB] %0t SETUP addr=%h write=%b wdata=%h",
+                     $time, paddr, pwrite, pwdata);
+        if (access && pready)
+            $display("[APB] %0t COMMIT addr=%h write=%b wdata=%h err=%b prdata=%h",
+                     $time, paddr, pwrite, pwdata, pslverr, prdata);
+    end
+    always @(posedge clk) begin
+        if ($time >= 800 && $time <= 925)
+            $display("[ST] %0t st=%0d req=%b pwr=%b wgot=%b | wv=%b wr=%b av=%b arr=%b arv=%b",
+                     $time, u_dut.state, u_dut.have_req, u_dut.pend_wr,
+                     u_dut.w_got,
+                     wvalid, wready, awvalid, awready, arvalid);
+    end
+`endif
+
     // ---------------- tests ----------------
     reg [1:0] resp;
     reg [31:0] rd;

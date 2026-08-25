@@ -58,28 +58,41 @@ module rv_debug #(
     reg [31:0] progbuf [0:PROGBUF_SIZE-1];
 
     // -------------------------------------------------------
-    // JTAG TAP Controller (IEEE 1149.1)
+    // JTAG TAP Controller — canonical IEEE 1149.1 16-state graph.
+    // BUG-DEBUG-002 (root cause of the IDCODE failure): the original FSM
+    // omitted Select-DR/Select-IR and wired RTI->SDR directly. Any standard
+    // JTAG master walking RTI->SelDR->SelIR->CapIR->ShiftIR instead landed
+    // in Pause-DR (probe evidence: the whole 32-bit IDCODE scan executed in
+    // Pause-DR, which shifts nothing, so TDO stayed 0). The graph below is
+    // the standard topology, so standard TMS sequences work unchanged.
     // -------------------------------------------------------
-    localparam TAP_TLR  = 4'd0;  // Test-Logic-Reset
-    localparam TAP_RTI  = 4'd1;  // Run-Test/Idle
-    localparam TAP_SDR  = 4'd2;  // Shift-DR
-    localparam TAP_E1DR = 4'd3;  // Exit1-DR
-    localparam TAP_PDR  = 4'd4;  // Pause-DR
-    localparam TAP_E2DR = 4'd5;  // Exit2-DR
-    localparam TAP_UDR  = 4'd6;  // Update-DR
-    localparam TAP_SIR  = 4'd7;  // Shift-IR
-    localparam TAP_E1IR = 4'd8;  // Exit1-IR
-    localparam TAP_PIR  = 4'd9;  // Pause-IR
-    localparam TAP_E2IR = 4'd10; // Exit2-IR
-    localparam TAP_UIR  = 4'd11; // Update-IR
-    localparam TAP_CDR  = 4'd12; // Capture-DR
-    localparam TAP_CIR  = 4'd13; // Capture-IR
-    localparam TAP_SDR2 = 4'd14; // (state encoding padding)
+    localparam TAP_TLR   = 4'd0;  // Test-Logic-Reset
+    localparam TAP_RTI   = 4'd1;  // Run-Test/Idle
+    localparam TAP_SELDR = 4'd2;  // Select-DR-Scan
+    localparam TAP_CDR   = 4'd3;  // Capture-DR
+    localparam TAP_SDR   = 4'd4;  // Shift-DR
+    localparam TAP_E1DR  = 4'd5;  // Exit1-DR
+    localparam TAP_PDR   = 4'd6;  // Pause-DR
+    localparam TAP_E2DR  = 4'd7;  // Exit2-DR
+    localparam TAP_UDR   = 4'd8;  // Update-DR
+    localparam TAP_SELIR = 4'd9;  // Select-IR-Scan
+    localparam TAP_CIR   = 4'd10; // Capture-IR
+    localparam TAP_SIR   = 4'd11; // Shift-IR
+    localparam TAP_E1IR  = 4'd12; // Exit1-IR
+    localparam TAP_PIR   = 4'd13; // Pause-IR
+    localparam TAP_E2IR  = 4'd14; // Exit2-IR
+    localparam TAP_UIR   = 4'd15; // Update-IR
 
     reg [3:0]  tap_state;
     reg [4:0]  ir;               // 5-bit instruction register
     reg [40:0] dr_shift;         // DR shift register (max DMI width = 41 bits)
     reg [40:0] dr_capture;       // Captured DR value
+
+    // TDO is registered: each Capture/Shift edge latches the bit currently
+    // presented at dr_shift[0]/ir[0], so a master sampling TDO just after
+    // each TCK rising edge receives bits in order — including the final bit,
+    // which is shifted on the Exit1 edge (by then the FSM has left Shift-DR,
+    // so a combinational TDO would drop it).
 
     // JTAG Instructions
     localparam IR_IDCODE  = 5'h01;
@@ -90,41 +103,68 @@ module rv_debug #(
     // IDCODE: [31:28]=version, [27:12]=partnum, [11:1]=mfr, [0]=1
     localparam IDCODE_VAL = 32'h2023_04FD; // SMVDU Titan-X debug IDCODE
 
-    // TAP State Machine (TCK domain)
+    // DR read mux — the value captured into dr_shift at Capture-DR, selected
+    // by the current instruction register.
+    reg [40:0] dr_read_val;
+    always @* begin
+        case (ir)
+            IR_IDCODE: dr_read_val = {9'h0, IDCODE_VAL};
+            IR_DTMCS:  dr_read_val = {9'h0, 32'h0000_0100}; // version 1, idle
+            IR_BYPASS: dr_read_val = 41'h0;
+            default:   dr_read_val = {9'h0, dmi_resp_data}; // DMI read window
+        endcase
+    end
+
+    // TAP State Machine (TCK domain) — IEEE 1149.1 Fig. 6 transitions
     always @(posedge tck or negedge rst_n) begin
         if (!rst_n) begin
             tap_state <= TAP_TLR;
             ir        <= IR_IDCODE;
+            dr_shift  <= 41'h0;
+            dr_capture<= 41'h0;
+            tdo       <= 1'b0;
         end else begin
             case (tap_state)
-                TAP_TLR:  tap_state <= tms ? TAP_TLR  : TAP_RTI;
-                TAP_RTI:  tap_state <= tms ? TAP_SDR  : TAP_RTI;  // Simplified
-                TAP_CDR:  tap_state <= tms ? TAP_E1DR : TAP_SDR;
-                TAP_SDR:  begin
+                TAP_TLR:   tap_state <= tms ? TAP_TLR   : TAP_RTI;
+                TAP_RTI:   tap_state <= tms ? TAP_SELDR : TAP_RTI;
+                TAP_SELDR: tap_state <= tms ? TAP_SELIR : TAP_CDR;
+                TAP_CDR: begin
+                    // BUG-DEBUG-001 fix retained: Capture-DR must LOAD the
+                    // shift register with the selected DR, not just advance.
                     tap_state <= tms ? TAP_E1DR : TAP_SDR;
-                    // Shift DR
-                    dr_shift <= {tdi, dr_shift[40:1]};
-                    tdo      <= dr_shift[0];
+                    dr_shift  <= dr_read_val;
+                    tdo       <= dr_read_val[0];
                 end
-                TAP_E1DR: tap_state <= tms ? TAP_UDR : TAP_PDR;
-                TAP_PDR:  tap_state <= tms ? TAP_E2DR : TAP_PDR;
-                TAP_E2DR: tap_state <= tms ? TAP_UDR : TAP_SDR;
-                TAP_UDR:  begin
+                TAP_SDR: begin
+                    tap_state <= tms ? TAP_E1DR : TAP_SDR;
+                    dr_shift  <= {tdi, dr_shift[40:1]};
+                    // Present the bit being shifted OUT this edge: after the
+                    // NBA lands, the updated dr_shift[0] equals the OLD
+                    // dr_shift[1]. Using dr_shift[0] here emits each bit one
+                    // TCK late (scan arrives rotated left by one).
+                    tdo       <= dr_shift[1];
+                end
+                TAP_E1DR:  tap_state <= tms ? TAP_UDR   : TAP_PDR;
+                TAP_PDR:   tap_state <= tms ? TAP_E2DR  : TAP_PDR;
+                TAP_E2DR:  tap_state <= tms ? TAP_UDR   : TAP_SDR;
+                TAP_UDR: begin
                     dr_capture <= dr_shift;
-                    tap_state  <= tms ? TAP_SDR : TAP_RTI;
+                    tap_state  <= tms ? TAP_SELDR : TAP_RTI;
                 end
-                TAP_CIR:  tap_state <= tms ? TAP_E1IR : TAP_SIR;
-                TAP_SIR:  begin
-                    tap_state  <= tms ? TAP_E1IR : TAP_SIR;
-                    ir         <= {tdi, ir[4:1]};
-                    tdo        <= ir[0];
+                TAP_SELIR: tap_state <= tms ? TAP_TLR   : TAP_CIR;
+                TAP_CIR:   tap_state <= tms ? TAP_E1IR  : TAP_SIR;
+                TAP_SIR: begin
+                    // IR shifts live (equivalent to capture-at-CIR +
+                    // update-at-UIR for masters that never scan IR out).
+                    tap_state <= tms ? TAP_E1IR : TAP_SIR;
+                    ir        <= {tdi, ir[4:1]};
+                    tdo       <= ir[1];  // same out-bit timing as TAP_SDR
                 end
-                TAP_E1IR: tap_state <= tms ? TAP_UIR : TAP_PIR;
-                TAP_UIR:  begin
-                    ir <= dr_shift[4:0]; // Load instruction
-                    tap_state <= tms ? TAP_SDR : TAP_RTI;
-                end
-                default:  tap_state <= TAP_TLR;
+                TAP_E1IR:  tap_state <= tms ? TAP_UIR   : TAP_PIR;
+                TAP_PIR:   tap_state <= tms ? TAP_E2IR  : TAP_PIR;
+                TAP_E2IR:  tap_state <= tms ? TAP_UIR   : TAP_SIR;
+                TAP_UIR:   tap_state <= tms ? TAP_SELDR : TAP_RTI;
+                default:   tap_state <= TAP_TLR;
             endcase
         end
     end

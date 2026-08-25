@@ -38,9 +38,15 @@ module apb_master_bfm #(
             resp = 2'b00;
             @(posedge clk);
             paddr <= a; pwdata <= d; pwrite <= 1'b1; psel <= 1'b1; penable <= 1'b0;
+            // Enter ACCESS for at least one FULL cycle. (Checking pready
+            // immediately after penable<=1 skipped the wait entirely for a
+            // combinationally-ready slave: both penable NBAs landed on the
+            // same edge, last-write-wins erased ACCESS, and the slave saw
+            // psel&&penable&&pwrite never true.)
             @(posedge clk);
             penable <= 1'b1;
             g = 0;
+            @(posedge clk);
             while (!pready && g < GUARD) begin @(posedge clk); g = g + 1; end
             if (g >= GUARD) begin
                 $display("[%m] ERROR: APB write pready never asserted @%0t", $time);
@@ -59,6 +65,7 @@ module apb_master_bfm #(
             @(posedge clk);
             penable <= 1'b1;
             g = 0;
+            @(posedge clk);
             while (!pready && g < GUARD) begin @(posedge clk); g = g + 1; end
             d = prdata;
             if (g >= GUARD) begin
@@ -114,18 +121,35 @@ module axi_master_bfm #(
     input  wire          m_rlast,
     input  wire [IDW-1:0] m_rid
 );
-    integer g;
+    integer g; // module-scope uses elsewhere; the two tasks below keep their
+               // OWN counters so concurrent axi_write/axi_read calls on one
+               // instance can't clobber each other's guard loops.
+
+    // Drive every output to a known value out of reset. Leaving the ready
+    // lines X until the first task runs leaked X into the fabric's
+    // forwarded-ready logic and corrupted arbitration decisions.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            m_awvalid <= 1'b0; m_awaddr <= {AW{1'b0}}; m_awid <= {IDW{1'b0}};
+            m_wvalid  <= 1'b0; m_wdata <= {DW{1'b0}};
+            m_wstrb   <= {(DW/8){1'b1}}; m_wlast <= 1'b0;
+            m_bready  <= 1'b0;
+            m_arvalid <= 1'b0; m_araddr <= {AW{1'b0}}; m_arid <= {IDW{1'b0}};
+            m_rready  <= 1'b0;
+        end
+    end
 
     task axi_write(input [AW-1:0] a, input [DW-1:0] d, output [1:0] resp);
+        integer wg;
         begin
             resp = 2'b00;
             @(posedge clk);
             m_awvalid <= 1'b1; m_awaddr <= a; m_awid <= {IDW{1'b0}};
-            g = 0;
-            while (!(m_awvalid === 1'b1 && m_awready === 1'b1) && g < GUARD) begin
-                @(posedge clk); g = g + 1;
+            wg = 0;
+            while (!(m_awvalid === 1'b1 && m_awready === 1'b1) && wg < GUARD) begin
+                @(posedge clk); wg = wg + 1;
             end
-            if (g >= GUARD) begin
+            if (wg >= GUARD) begin
                 $display("[%m] ERROR: AW handshake timeout addr=%h @%0t", a, $time);
                 resp = 2'b10;
             end
@@ -133,20 +157,20 @@ module axi_master_bfm #(
             // W channel
             @(posedge clk);
             m_wvalid <= 1'b1; m_wdata <= d; m_wstrb <= {DW/8{1'b1}}; m_wlast <= 1'b1;
-            g = 0;
-            while (!(m_wvalid === 1'b1 && m_wready === 1'b1) && g < GUARD) begin
-                @(posedge clk); g = g + 1;
+            wg = 0;
+            while (!(m_wvalid === 1'b1 && m_wready === 1'b1) && wg < GUARD) begin
+                @(posedge clk); wg = wg + 1;
             end
-            if (g >= GUARD) begin
+            if (wg >= GUARD) begin
                 $display("[%m] ERROR: W handshake timeout @%0t", $time);
                 resp = 2'b10;
             end
             m_wvalid <= 1'b0; m_wlast <= 1'b0;
             // B response
             m_bready <= 1'b1;
-            g = 0;
-            while (!(m_bvalid === 1'b1) && g < GUARD) begin @(posedge clk); g = g + 1; end
-            if (g >= GUARD) begin
+            wg = 0;
+            while (!(m_bvalid === 1'b1) && wg < GUARD) begin @(posedge clk); wg = wg + 1; end
+            if (wg >= GUARD) begin
                 $display("[%m] ERROR: B response timeout @%0t", $time);
                 resp = 2'b10;
             end else begin
@@ -159,22 +183,23 @@ module axi_master_bfm #(
     endtask
 
     task axi_read(input [AW-1:0] a, output [DW-1:0] d, output [1:0] resp);
+        integer rg;
         begin
             resp = 2'b00; d = {DW{1'b0}};
             @(posedge clk);
             m_arvalid <= 1'b1; m_araddr <= a; m_arid <= {IDW{1'b0}}; m_rready <= 1'b1;
-            g = 0;
-            while (!(m_arvalid === 1'b1 && m_arready === 1'b1) && g < GUARD) begin
-                @(posedge clk); g = g + 1;
+            rg = 0;
+            while (!(m_arvalid === 1'b1 && m_arready === 1'b1) && rg < GUARD) begin
+                @(posedge clk); rg = rg + 1;
             end
-            if (g >= GUARD) begin
+            if (rg >= GUARD) begin
                 $display("[%m] ERROR: AR handshake timeout addr=%h @%0t", a, $time);
                 resp = 2'b10;
             end
             m_arvalid <= 1'b0;
-            g = 0;
-            while (!(m_rvalid === 1'b1) && g < GUARD) begin @(posedge clk); g = g + 1; end
-            if (g >= GUARD) begin
+            rg = 0;
+            while (!(m_rvalid === 1'b1) && rg < GUARD) begin @(posedge clk); rg = rg + 1; end
+            if (rg >= GUARD) begin
                 $display("[%m] ERROR: R response timeout @%0t", $time);
                 resp = 2'b10;
             end else begin
@@ -218,9 +243,15 @@ module axi_mem_slave_bfm #(
     reg [DW-1:0] mem [0:DEPTH-1];
     reg [AW-1:0] aw_addr_q, ar_addr_q;
     reg          aw_err, ar_err;
+    reg          b_pend, r_pend;
 
     wire aw_hit = (s_awaddr >= BASE) && (s_awaddr < BASE + DEPTH*(DW/8));
     wire ar_hit = (s_araddr >= BASE) && (s_araddr < BASE + DEPTH*(DW/8));
+
+    // Response issue events. VALID is HELD until READY (AXI contract) via the
+    // *_pend flags — a one-cycle registered pulse silently loses the response
+    // whenever the consumer isn't ready that exact cycle.
+    wire w_commit = !s_awready && s_wlast && s_wvalid && !b_pend;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -228,8 +259,12 @@ module axi_mem_slave_bfm #(
             s_arready <= 1'b1; s_rvalid <= 1'b0;
             s_bresp <= 2'b00; s_rresp <= 2'b00; s_rlast <= 1'b0;
             aw_err <= 1'b0; ar_err <= 1'b0;
+            b_pend <= 1'b0; r_pend <= 1'b0;
         end else begin
-            s_bvalid <= 1'b0; s_rvalid <= 1'b0;
+            // ---- write path ----
+            // Serialized: address/data stay un-ready until THIS transfer's B
+            // has been ACCEPTED, so no second write can race the one-slot
+            // response tracker.
             if (s_awvalid && s_awready) begin
                 aw_addr_q <= s_awaddr; aw_err <= !aw_hit; s_awready <= 1'b0;
             end
@@ -237,19 +272,33 @@ module axi_mem_slave_bfm #(
                 mem[(aw_addr_q-BASE)/(DW/8)] <=
                     (s_wdata & wmask_eff()) | (mem[(aw_addr_q-BASE)/(DW/8)] & ~wmask_eff());
             end
-            if (!s_awready && s_wlast) begin
-                s_bvalid <= 1'b1; s_bresp <= aw_err ? 2'b11 : 2'b00; s_awready <= 1'b1;
-                s_wready <= 1'b1;
+            if (w_commit) begin
+                s_bresp <= aw_err ? 2'b11 : 2'b00;
+                b_pend  <= 1'b1;
+            end else if (b_pend && s_bready) begin
+                b_pend    <= 1'b0;
+                s_awready <= 1'b1;
+                s_wready  <= 1'b1;
             end
+            // hold-or-drop: assert on commit, keep while pending&unaccepted
+            s_bvalid <= w_commit || (b_pend && !s_bready);
+
+            // ---- read path ----
+            // Same serialization: AR un-ready until THIS read's beat is
+            // accepted. Data is captured from the LIVE address at acceptance
+            // (ar_addr_q hasn't updated yet on this edge).
             if (s_arvalid && s_arready) begin
-                ar_addr_q <= s_araddr; ar_err <= !ar_hit; s_arready <= 1'b0;
-            end
-            if (!s_arready) begin
-                s_rvalid <= 1'b1; s_rlast <= 1'b1;
-                s_rdata  <= ar_err ? {DW{1'b0}} : mem[(ar_addr_q-BASE)/(DW/8)];
-                s_rresp  <= ar_err ? 2'b11 : 2'b00;
+                ar_addr_q <= s_araddr; ar_err <= !ar_hit;
+                r_pend    <= 1'b1;
+                s_rlast   <= 1'b1;
+                s_rdata   <= !ar_hit ? {DW{1'b0}} : mem[(s_araddr-BASE)/(DW/8)];
+                s_rresp   <= !ar_hit ? 2'b11 : 2'b00;
+                s_arready <= 1'b0;
+            end else if (r_pend && s_rready) begin
+                r_pend    <= 1'b0;
                 s_arready <= 1'b1;
             end
+            s_rvalid <= (s_arvalid && s_arready) || (r_pend && !s_rready);
         end
     end
     function [DW-1:0] wmask_eff;

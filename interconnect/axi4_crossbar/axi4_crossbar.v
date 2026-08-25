@@ -237,76 +237,122 @@ module axi4_crossbar #(
             end
         end else begin
             // ---- per-master queues ----
+            // Push/pop on the SAME edge must not fight: independent
+            // if-blocks let the later NBA silently cancel the earlier one
+            // (a push erased by a same-cycle pop lost a whole transaction).
             for (i = 0; i < NM; i = i + 1) begin : m_loop
-                // push write target on AW handshake to a REAL slave
-                if ((aw_tgt[i] < T_UNMAPPED) && m_awready[i] && m_awvalid[i]) begin
-                    wr_q[i][(wr_rp[i] + wr_cnt[i]) & 2'h3] <= aw_tgt[i];
-                    wr_cnt[i] <= wr_cnt[i] + 2'd1;
-                end
-                // pop write target on WLAST accepted by the head slave
-                if ((wr_cnt[i] != 0) && (wr_q[i][wr_rp[i]] < T_UNMAPPED)) begin
-                    if (wl_hs[wr_q[i][wr_rp[i]]]) begin
+                reg wpush, wpop, rpush, rpop;
+                begin
+                    wpush = (aw_tgt[i] < T_UNMAPPED) && m_awready[i] && m_awvalid[i];
+                    wpop  = (wr_cnt[i] != 0) &&
+                            (wr_q[i][wr_rp[i]] < T_UNMAPPED) &&
+                            wl_hs[wr_q[i][wr_rp[i]]];
+                    if (wpush)
+                        wr_q[i][(wr_rp[i] + wr_cnt[i]) & 2'h3] <= aw_tgt[i];
+                    if (wpush && !wpop)      wr_cnt[i] <= wr_cnt[i] + 2'd1;
+                    else if (!wpush && wpop) begin
                         wr_rp[i]  <= wr_rp[i] + 2'd1;
                         wr_cnt[i] <= wr_cnt[i] - 2'd1;
+                    end else if (wpush && wpop) begin
+                        // both: cnt unchanged. The push landed in the tail
+                        // slot, which EQUALS the head slot when cnt was 1 —
+                        // the new entry simply replaces the consumed one and
+                        // the pointer must hold. Advancing here (cnt>1) is
+                        // safe because tail != head then.
+                        if (wr_cnt[i] > 2'd1) wr_rp[i] <= wr_rp[i] + 2'd1;
                     end
-                end
 
-                // push read target on AR handshake to a REAL slave
-                if ((ar_tgt[i] < T_UNMAPPED) && m_arready[i] && m_arvalid[i]) begin
-                    rd_tgt[i] <= ar_tgt[i];
-                    rd_cnt[i] <= rd_cnt[i] + 2'd1;
-                end
-                // pop when THIS master's owned RLAST beat drains
-                if ((rd_cnt[i] != 0) && (rd_tgt[i] < T_UNMAPPED)) begin
-                    if (s_rvalid[rd_tgt[i]] && s_rready[rd_tgt[i]] &&
-                        s_rlast[rd_tgt[i]] &&
-                        (r_own[rd_tgt[i]][r_rp[rd_tgt[i]]] == i[3:0]))
-                        rd_cnt[i] <= rd_cnt[i] - 2'd1;
+                    rpush = (ar_tgt[i] < T_UNMAPPED) && m_arready[i] && m_arvalid[i];
+                    rpop  = (rd_cnt[i] != 0) && (rd_tgt[i] < T_UNMAPPED) &&
+                            s_rvalid[rd_tgt[i]] && s_rready[rd_tgt[i]] &&
+                            s_rlast[rd_tgt[i]] &&
+                            (r_own[rd_tgt[i]][r_rp[rd_tgt[i]]] == i[3:0]);
+                    if (rpush) rd_tgt[i] <= ar_tgt[i];
+                    if (rpush && !rpop)      rd_cnt[i] <= rd_cnt[i] + 2'd1;
+                    else if (!rpush && rpop) rd_cnt[i] <= rd_cnt[i] - 2'd1;
                 end
             end
 
-            // ---- per-slave owner FIFOs ----
+            // ---- per-slave owner FIFOs (same push/pop discipline) ----
             for (s = 0; s < NS; s = s + 1) begin : s_loop
-                if (aw_hs[s]) begin
-                    b_own[s][(b_rp[s] + b_cnt[s]) & 2'h3] <= aw_sel[s][3:0];
-                    b_cnt[s] <= b_cnt[s] + 2'd1;
-                end
-                if ((b_cnt[s] != 0) && s_bvalid[s] && s_bready[s]) begin
-                    b_rp[s]  <= b_rp[s] + 2'd1;
-                    b_cnt[s] <= b_cnt[s] - 2'd1;
-                end
-                if (ar_hs[s]) begin
-                    r_own[s][(r_rp[s] + r_cnt[s]) & 2'h3] <= ar_sel[s][3:0];
-                    r_cnt[s] <= r_cnt[s] + 2'd1;
-                end
-                if ((r_cnt[s] != 0) && s_rvalid[s] && s_rready[s] && s_rlast[s]) begin
-                    r_rp[s]  <= r_rp[s] + 2'd1;
-                    r_cnt[s] <= r_cnt[s] - 2'd1;
+                reg bpush, bpop, rpush2, rpop2;
+                begin
+                    bpush = aw_hs[s];
+                    bpop  = (b_cnt[s] != 0) && s_bvalid[s] && s_bready[s];
+                    if (bpush)
+                        b_own[s][(b_rp[s] + b_cnt[s]) & 2'h3] <= aw_sel[s][3:0];
+                    if (bpush && !bpop)      b_cnt[s] <= b_cnt[s] + 2'd1;
+                    else if (!bpush && bpop) begin
+                        b_rp[s]  <= b_rp[s] + 2'd1;
+                        b_cnt[s] <= b_cnt[s] - 2'd1;
+                    end else if (bpush && bpop) begin
+                        // replace-in-place when cnt==1, advance otherwise
+                        if (b_cnt[s] > 2'd1) b_rp[s] <= b_rp[s] + 2'd1;
+                    end
+
+                    rpush2 = ar_hs[s];
+                    rpop2  = (r_cnt[s] != 0) && s_rvalid[s] && s_rready[s]
+                             && s_rlast[s];
+                    if (rpush2)
+                        r_own[s][(r_rp[s] + r_cnt[s]) & 2'h3] <= ar_sel[s][3:0];
+                    if (rpush2 && !rpop2)      r_cnt[s] <= r_cnt[s] + 2'd1;
+                    else if (!rpush2 && rpop2) begin
+                        r_rp[s]  <= r_rp[s] + 2'd1;
+                        r_cnt[s] <= r_cnt[s] - 2'd1;
+                    end else if (rpush2 && rpop2) begin
+                        if (r_cnt[s] > 2'd1) r_rp[s] <= r_rp[s] + 2'd1;
+                    end
                 end
             end
 
             // ---- unmapped-access responders ----
+            // Same push/pop discipline: a same-cycle push while the error B/R
+            // drains must not let the pop's count-decrement erase the push.
             for (i = 0; i < NM; i = i + 1) begin : e_loop
-                if (m_awvalid[i] && m_awready[i] && (aw_tgt[i] == T_UNMAPPED)) begin
-                    err_bid[i][(err_b_rp[i] + err_b_cnt[i]) & 2'h3] <= m_awid[i*IDW +: IDW];
-                    err_b_cnt[i] <= err_b_cnt[i] + 2'd1;
-                end
-                if (!err_b_act[i] && (err_b_cnt[i] != 0)) err_b_act[i] <= 1'b1;
-                else if (err_b_act[i] && m_bready[i]) begin
-                    err_b_act[i] <= 1'b0;
-                    err_b_rp[i]  <= err_b_rp[i] + 2'd1;
-                    err_b_cnt[i] <= err_b_cnt[i] - 2'd1;
-                end
+                reg bpush3, bpop3, rpush3, rpop3;
+                begin
+                    bpush3 = m_awvalid[i] && m_awready[i]
+                             && (aw_tgt[i] == T_UNMAPPED);
+                    bpop3  = err_b_act[i] && m_bready[i];
+                    if (bpush3)
+                        err_bid[i][(err_b_rp[i] + err_b_cnt[i]) & 2'h3]
+                            <= m_awid[i*IDW +: IDW];
+                    if (!err_b_act[i] && (err_b_cnt[i] != 0))
+                        err_b_act[i] <= 1'b1;
+                    else if (bpush3 && !bpop3)      err_b_cnt[i] <= err_b_cnt[i] + 2'd1;
+                    else if (!bpush3 && bpop3) begin
+                        err_b_act[i] <= 1'b0;
+                        err_b_rp[i]  <= err_b_rp[i] + 2'd1;
+                        err_b_cnt[i] <= err_b_cnt[i] - 2'd1;
+                    end else if (bpush3 && bpop3) begin
+                        err_b_act[i] <= 1'b0;   // drained this one, next (if any)
+                        if (err_b_cnt[i] > 2'd1) begin
+                            err_b_rp[i] <= err_b_rp[i] + 2'd1;
+                            err_b_act[i] <= 1'b1;
+                        end
+                        // cnt unchanged: one in, one out
+                    end
 
-                if (m_arvalid[i] && m_arready[i] && (ar_tgt[i] == T_UNMAPPED)) begin
-                    err_rid[i][(err_r_rp[i] + err_r_cnt[i]) & 2'h3] <= m_arid[i*IDW +: IDW];
-                    err_r_cnt[i] <= err_r_cnt[i] + 2'd1;
-                end
-                if (!err_r_act[i] && (err_r_cnt[i] != 0)) err_r_act[i] <= 1'b1;
-                else if (err_r_act[i] && m_rready[i]) begin
-                    err_r_act[i] <= 1'b0;
-                    err_r_rp[i]  <= err_r_rp[i] + 2'd1;
-                    err_r_cnt[i] <= err_r_cnt[i] - 2'd1;
+                    rpush3 = m_arvalid[i] && m_arready[i]
+                             && (ar_tgt[i] == T_UNMAPPED);
+                    rpop3  = err_r_act[i] && m_rready[i];
+                    if (rpush3)
+                        err_rid[i][(err_r_rp[i] + err_r_cnt[i]) & 2'h3]
+                            <= m_arid[i*IDW +: IDW];
+                    if (!err_r_act[i] && (err_r_cnt[i] != 0))
+                        err_r_act[i] <= 1'b1;
+                    else if (rpush3 && !rpop3)      err_r_cnt[i] <= err_r_cnt[i] + 2'd1;
+                    else if (!rpush3 && rpop3) begin
+                        err_r_act[i] <= 1'b0;
+                        err_r_rp[i]  <= err_r_rp[i] + 2'd1;
+                        err_r_cnt[i] <= err_r_cnt[i] - 2'd1;
+                    end else if (rpush3 && rpop3) begin
+                        err_r_act[i] <= 1'b0;
+                        if (err_r_cnt[i] > 2'd1) begin
+                            err_r_rp[i] <= err_r_rp[i] + 2'd1;
+                            err_r_act[i] <= 1'b1;
+                        end
+                    end
                 end
             end
 

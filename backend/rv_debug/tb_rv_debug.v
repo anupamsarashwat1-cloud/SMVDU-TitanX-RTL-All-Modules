@@ -69,19 +69,25 @@ module tb_rv_debug();
     // TCK is slower than system clock (typical JTAG)
     always #50 tck = ~tck;
 
-    // JTAG TAP state machine bit-bang helpers
+    // JTAG TAP state machine bit-bang helpers.
+    // BUG-DEBUG-003 fix: every TMS/TDI change happens >=1ns AFTER a rising
+    // edge (never coincident with one). A bare "<assign>; @(posedge tck)"
+    // lets the next statement execute ON the edge instant, racing the DUT's
+    // posedge sampler — the FSM then consumed the new TMS one edge early
+    // and walks diverged (the DR scan ended up running inside Shift-IR).
     // TMS sequence to go to Test-Logic-Reset (5 TMS=1 pulses)
     task jtag_reset;
         integer i;
         begin
             tms=1; tdi=0;
-            repeat(5) begin @(posedge tck); end
-            tms=0; @(posedge tck);  // Run-Test/Idle
+            repeat(5) begin @(posedge tck); #1; end
+            tms=0; @(posedge tck); #1;  // Run-Test/Idle
         end
     endtask
 
     // Shift 'nbits' bits of 'data' into DR, capture TDO into 'out'
-    // Assumes we are in Capture-DR state
+    // Assumes we are in Capture-DR state (goto_shift_dr leaves you there);
+    // the loop's first edge performs Capture-DR->Shift-DR with the load.
     task jtag_shift_dr;
         input  [63:0] data;
         input  integer nbits;
@@ -95,27 +101,27 @@ module tb_rv_debug();
                 @(posedge tck); #1;
                 out[i] = tdo;
             end
-            @(posedge tck);  // Update-DR
-            tms=0; @(posedge tck);  // Run-Test/Idle
+            tms=1; @(posedge tck); #1;  // Update-DR
+            tms=0; @(posedge tck); #1;  // Run-Test/Idle
         end
     endtask
 
-    // Navigate to Shift-IR
+    // Navigate to Shift-IR (from Run-Test/Idle)
     task goto_shift_ir;
         begin
-            tms=1; @(posedge tck);  // Select-DR
-            tms=1; @(posedge tck);  // Select-IR
-            tms=0; @(posedge tck);  // Capture-IR
-            tms=0; @(posedge tck);  // Shift-IR
+            tms=1; @(posedge tck); #1;  // Select-DR
+            tms=1; @(posedge tck); #1;  // Select-IR
+            tms=0; @(posedge tck); #1;  // Capture-IR
+            tms=0; @(posedge tck); #1;  // Shift-IR
         end
     endtask
 
-    // Navigate to Shift-DR from Idle
+    // Navigate to Capture-DR from Idle (scan loop's first edge captures)
     task goto_shift_dr;
         begin
-            tms=1; @(posedge tck);  // Select-DR
-            tms=0; @(posedge tck);  // Capture-DR
-            tms=0;                  // Stay Shift-DR
+            tms=1; @(posedge tck); #1;  // Select-DR
+            tms=0; @(posedge tck); #1;  // Capture-DR
+            tms=0;                      // Stay: first shift edge captures
         end
     endtask
 
@@ -129,8 +135,8 @@ module tb_rv_debug();
                 if (i==4) tms=1;
                 @(posedge tck); #1;
             end
-            tms=1; @(posedge tck);  // Update-IR
-            tms=0; @(posedge tck);  // Idle
+            tms=1; @(posedge tck); #1;  // Update-IR
+            tms=0; @(posedge tck); #1;  // Idle
         end
     endtask
 
@@ -176,17 +182,21 @@ module tb_rv_debug();
         shift_ir(5'b00001);  // IDCODE
         goto_shift_dr();
         jtag_shift_dr(64'h0, 32, cap);
-        // KNOWN RTL BUG: BUG-DEBUG-001
-        // TAP CDR (Capture-DR) does not pre-load dr_shift with IDCODE_VAL.
-        // RTI→SDR shortcut also skips CDR. So dr_shift is uninitialized (X).
-        // TDO remains X during the first DR scan. This is an RTL defect.
-        if (cap[0] !== 1'bx) begin
+        // BUG-DEBUG-001 FIXED: Capture-DR (and the RTI→SDR shortcut entry)
+        // now load dr_shift from the DR read mux, so the scan returns the
+        // real IDCODE. The check below is exact — no X tolerance.
+        if (cap[0] === 1'b1) begin
             $display("PASS [%0t] IDCODE bit0=%b (TDO valid)", $time, cap[0]);
         end else begin
-            $display("BUG  [%0t] IDCODE TDO=X: BUG-DEBUG-001 (dr_shift not initialized in CDR)", $time);
-            // Do not count as TB failure — this is a known RTL bug to report
+            $display("FAIL [%0t] IDCODE TDO=%b (expected 1)", $time, cap[0]);
+            error_count = error_count + 1;
         end
-        $display("INFO: IDCODE=0x%08X (expected 0x202304FD, actual may differ due to bug)", cap[31:0]);
+        if (cap[31:0] === 32'h2023_04FD) begin
+            $display("PASS [%0t] IDCODE value=0x202304FD", $time);
+        end else begin
+            $display("FAIL [%0t] IDCODE=0x%08X (expected 0x202304FD)", $time, cap[31:0]);
+            error_count = error_count + 1;
+        end
 
         // TEST 4: Select DTMCS (5'b10000) and read version field
         $display("\n--- TEST 4: DTMCS read (version check) ---");

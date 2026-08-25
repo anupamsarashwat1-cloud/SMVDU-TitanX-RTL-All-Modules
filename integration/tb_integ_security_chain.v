@@ -23,8 +23,12 @@ module tb_integ_security_chain;
     wire        psel, penable, pwrite;
     wire [31:0] prdata_drbg, prdata_boot;
     wire        drbg_irq;
-    wire        psel_drbg = psel && (paddr[11:8] == 4'h1);
-    wire        psel_boot = psel && (paddr[11:8] == 4'h2);
+    // Block selects decode the REGION nibble (bits [31:28]): 0x1 -> DRBG,
+    // 0x2 -> secure_boot. (The original decoded bits [11:8], which are 0x0
+    // for every 0x1000_xxxx/0x2000_xxxx address — neither engine was ever
+    // selected and all reads returned the mux default zero.)
+    wire        psel_drbg = psel && (paddr[31:28] == 4'h1);
+    wire        psel_boot = psel && (paddr[31:28] == 4'h2);
     wire [31:0] prdata_mux = psel_drbg ? prdata_drbg :
                             psel_boot ? prdata_boot : 32'h0;
 

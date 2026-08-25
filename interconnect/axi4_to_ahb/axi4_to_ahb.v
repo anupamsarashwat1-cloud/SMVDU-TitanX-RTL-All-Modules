@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SMVDU-TITAN-X SoC — AXI4 to AHB3-Lite Bridge
 `timescale 1ns/1ps
+// Width contract: the AXI slave side (DW) and the AHB master side (HDW) are
+// INDEPENDENT parameters. The Titan-X fabric is 64-bit AXI but the AHB
+// subsystem bus is 32 bits, so the bridge adapts: writes take the low HDW
+// lanes of the AXI beat, reads are zero-extended into the AXI-width return.
+// hsize stays 3'b010 (32-bit word) by construction — a single AXI beat maps
+// to exactly one AHB word per transfer.
 module axi4_to_ahb #(
-    parameter AW = 40,
-    parameter DW = 32,
+    parameter AW  = 40,
+    parameter DW  = 32,   // AXI-side datapath width
+    parameter HDW = 32,   // AHB-side datapath width (bridge adapts DW->HDW)
     parameter IDW = 4
 ) (
     input  wire        clk,
@@ -26,8 +33,8 @@ module axi4_to_ahb #(
     output reg [1:0]   htrans,
     output reg [2:0]   hsize,
     output reg [2:0]   hburst,
-    output reg [DW-1:0] hwdata,
-    input  wire [DW-1:0] hrdata,
+    output reg [HDW-1:0] hwdata,
+    input  wire [HDW-1:0] hrdata,
     input  wire        hready,
     input  wire        hresp
 );
@@ -90,11 +97,11 @@ module axi4_to_ahb #(
                 end
                 BS_DATA: begin
                     if (is_wr && s_wvalid) begin
-                        hwdata   <= s_wdata;
+                        hwdata   <= s_wdata[HDW-1:0];      // low lanes only
                         s_wready <= 1'b0;
                         bstate   <= BS_RESP;
                     end else if (!is_wr && hready) begin
-                        s_rdata  <= hrdata;
+                        s_rdata  <= {{(DW-HDW){1'b0}}, hrdata};
                         s_rvalid <= 1'b1;
                         htrans   <= HTRANS_IDLE;
                         if (s_rready) bstate <= BS_IDLE;

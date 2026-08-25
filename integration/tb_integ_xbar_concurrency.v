@@ -29,6 +29,10 @@ module tb_integ_xbar_concurrency;
     wire [(NM*(DW/8))-1:0] m_wstrb;
     wire [(NM*2)-1:0]    m_bresp, m_rresp;
     wire [(NM*IDW)-1:0]  m_awid, m_bid, m_arid, m_rid;
+    // True master-side readiness (the BFM drives these) fed back into the
+    // crossbar — tying the fabric's ready inputs to 1 would let owner-FIFO
+    // entries pop even when the real master wasn't listening.
+    wire [NM-1:0]        m_bready_c, m_rready_c;
 
     // ---------------- slave-side flattened buses ----------------
     wire [NS-1:0]        s_awvalid, s_awready, s_wvalid, s_wready, s_wlast;
@@ -46,11 +50,11 @@ module tb_integ_xbar_concurrency;
         .m_awid(m_awid),
         .m_wvalid(m_wvalid), .m_wready(m_wready), .m_wdata(m_wdata),
         .m_wstrb(m_wstrb), .m_wlast(m_wlast),
-        .m_bvalid(m_bvalid), .m_bready({NM{1'b1}}), .m_bresp(m_bresp),
+        .m_bvalid(m_bvalid), .m_bready(m_bready_c), .m_bresp(m_bresp),
         .m_bid(m_bid),
         .m_arvalid(m_arvalid), .m_arready(m_arready), .m_araddr(m_araddr),
         .m_arid(m_arid),
-        .m_rvalid(m_rvalid), .m_rready({NM{1'b1}}), .m_rdata(m_rdata),
+        .m_rvalid(m_rvalid), .m_rready(m_rready_c), .m_rdata(m_rdata),
         .m_rresp(m_rresp), .m_rlast(m_rlast), .m_rid(m_rid),
         .s_awvalid(s_awvalid), .s_awready(s_awready), .s_awaddr(s_awaddr),
         .s_awid(s_awid),
@@ -98,11 +102,11 @@ module tb_integ_xbar_concurrency;
             .m_wvalid(m_wvalid[mv]), .m_wready(m_wready[mv]),
             .m_wdata(m_wdata[mv*DW +: DW]),
             .m_wstrb(m_wstrb[mv*(DW/8) +: (DW/8)]), .m_wlast(m_wlast[mv]),
-            .m_bvalid(m_bvalid[mv]), .m_bready(),
+            .m_bvalid(m_bvalid[mv]), .m_bready(m_bready_c[mv]),
             .m_bresp(m_bresp[mv*2 +: 2]), .m_bid(),
             .m_arvalid(m_arvalid[mv]), .m_arready(m_arready[mv]),
             .m_araddr(m_araddr[mv*AW +: AW]), .m_arid(),
-            .m_rvalid(m_rvalid[mv]), .m_rready(),
+            .m_rvalid(m_rvalid[mv]), .m_rready(m_rready_c[mv]),
             .m_rdata(m_rdata[mv*DW +: DW]),
             .m_rresp(m_rresp[mv*2 +: 2]), .m_rlast(m_rlast[mv]), .m_rid()
         );
@@ -116,7 +120,11 @@ module tb_integ_xbar_concurrency;
                                   idx * 64'h0100_0000_0000_0001);
     endfunction
 
-    task m_write(input integer u, input [39:0] a, input [63:0] d);
+    // AUTOMATIC: these run concurrently from three fork branches; static
+    // tasks share one activation record, and overlapping calls clobbered
+    // each other's address/data arguments — whole transfers vanished while
+    // still reporting OKAY (the original "lost write" mystery).
+    task automatic m_write(input integer u, input [39:0] a, input [63:0] d);
         reg [1:0] r;
         begin
             if (u == 0)      g_mst[0].u_m.axi_write(a, d, r);
@@ -130,7 +138,7 @@ module tb_integ_xbar_concurrency;
         end
     endtask
 
-    task m_read_expect(input integer u, input [39:0] a, input [63:0] e);
+    task automatic m_read_expect(input integer u, input [39:0] a, input [63:0] e);
         reg [1:0] r;
         reg [63:0] d;
         begin
@@ -144,6 +152,52 @@ module tb_integ_xbar_concurrency;
     endtask
 
     integer k0, k1, k2, v;
+
+    // ---------------- forensics ----------------
+`ifdef TB_XBAR_TRACE
+    always @(posedge clk) begin
+        if ($time >= 100 && $time <= 2900) begin
+            if (u_xbar.aw_hs[0]) $display("[XT] %0t S0.AW m=%0d a=%h",
+                $time, u_xbar.aw_sel[0], s_awaddr[0*AW +: AW]);
+            if (u_xbar.wl_hs[0]) $display("[XT] %0t S0.WL m=%0d d=%h",
+                $time, u_xbar.w_sel[0], s_wdata[0*DW +: DW]);
+            if (u_xbar.aw_hs[1]) $display("[XT] %0t S1.AW m=%0d a=%h",
+                $time, u_xbar.aw_sel[1], s_awaddr[1*AW +: AW]);
+            if (u_xbar.wl_hs[1]) $display("[XT] %0t S1.WL m=%0d d=%h",
+                $time, u_xbar.w_sel[1], s_wdata[1*DW +: DW]);
+            if (s_bvalid[0] && s_bready[0]) $display("[XT] %0t S0.B", $time);
+            if (s_bvalid[1] && s_bready[1]) $display("[XT] %0t S1.B", $time);
+            $display("[XT] %0t bv=%b%b%b br=%b%b%b bc0=%0d bo0=%0d",
+                     $time,
+                     m_bvalid[2], m_bvalid[1], m_bvalid[0],
+                     g_mst[2].u_m.m_bready, g_mst[1].u_m.m_bready,
+                     g_mst[0].u_m.m_bready,
+                     u_xbar.b_cnt[0], u_xbar.b_own[0][u_xbar.b_rp[0]]);
+        end
+    end
+`endif
+
+    // Ground truth: scan the BFM arrays directly and list every cell that
+    // doesn't hold its writer-indexed expected value.
+    integer qz;
+    reg [63:0] gotz, expz;
+    task audit_mem;
+        begin
+            for (qz = 0; qz < NLOC; qz = qz + 1) begin
+                expz = exp_data(2'd0, qz); gotz = g_slv[0].u_slv.mem[32+qz];
+                if (gotz !== expz)
+                    $display("[AUDIT] s0 r1 k=%0d got=%h exp=%h", qz, gotz, expz);
+                expz = exp_data(2'd1, qz); gotz = g_slv[0].u_slv.mem[64+qz];
+                if (gotz !== expz)
+                    $display("[AUDIT] s0 r2 k=%0d got=%h exp=%h", qz, gotz, expz);
+                expz = exp_data(2'd2, qz); gotz = g_slv[1].u_slv.mem[32+qz];
+                if (gotz !== expz)
+                    $display("[AUDIT] s1 r1 k=%0d got=%h exp=%h", qz, gotz, expz);
+            end
+            if (g_slv[0].u_slv.mem[96] !== 64'hDEAD_D00D_DEAD_D00D)
+                $display("[AUDIT] s0 xtra got=%h", g_slv[0].u_slv.mem[96]);
+        end
+    endtask
 
     initial begin
         $dumpfile("tb_integ_xbar_concurrency.vcd");
@@ -192,6 +246,7 @@ module tb_integ_xbar_concurrency;
         join
         m_read_expect(1, 40'h00_8000_0300, 64'hDEAD_D00D_DEAD_D00D);
 
+        audit_mem;
         `TB_REPORT("XBAR_CONC")
     end
 

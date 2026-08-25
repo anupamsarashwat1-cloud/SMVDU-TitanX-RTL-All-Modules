@@ -49,103 +49,89 @@ module apb_bridge #(
     // -------------------------------------------------------
     // State Machine for APB Bridge
     // -------------------------------------------------------
+    // Iteration 4: one-outstanding sequencer. The Iteration-3/early-4 scheme
+    // tracked requests with ambient aw_accepted/w_accepted/ar_accepted flags
+    // and picked SETUP via "any request" branches — so an AR arriving beside
+    // an unfinished AW started an APB transfer with the OLD pwrite/pwdata
+    // (a garbage write that still answered OKAY). Now the request type is
+    // LATCHED at acceptance and drives everything downstream.
     localparam IDLE   = 2'd0;
     localparam SETUP  = 2'd1;
     localparam ACCESS = 2'd2;
 
     reg [1:0] state, next_state;
 
-    // Registers to hold transaction details
-    reg [AW-1:0] addr_reg;
-    reg [DW-1:0] wdata_reg;
+    // Transaction registers — written ONLY at acceptance edges
+    reg [AW-1:0]     addr_reg;
+    reg [DW-1:0]     wdata_reg;
     reg [(DW/8)-1:0] wstrb_reg;
-    reg          is_write;
+    reg              have_req;   // a request is latched, transfer pending
+    reg              pend_wr;    // latched type: 1=write (needs W too), 0=read
+    reg              w_got;      // current write's W beat captured
 
-    // AXI handshake tracking
-    reg aw_accepted, w_accepted, ar_accepted;
+    wire aw_ack = s_awvalid && s_awready;
+    wire w_ack  = s_wvalid  && s_wready;
+    wire ar_ack = s_arvalid && s_arready;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= IDLE;
-            addr_reg <= {AW{1'b0}};
+            state     <= IDLE;
+            addr_reg  <= {AW{1'b0}};
             wdata_reg <= {DW{1'b0}};
             wstrb_reg <= {(DW/8){1'b0}};
-            is_write <= 1'b0;
-            aw_accepted <= 1'b0;
-            w_accepted <= 1'b0;
-            ar_accepted <= 1'b0;
+            have_req  <= 1'b0;
+            pend_wr   <= 1'b0;
+            w_got     <= 1'b0;
         end else begin
             state <= next_state;
 
-            // Latch write address
-            if (s_awvalid && s_awready) begin
-                aw_accepted <= 1'b1;
-                addr_reg <= s_awaddr;
+            // Retire first, so a same-edge new request wins cleanly.
+            if (state == ACCESS && pready) begin
+                have_req <= 1'b0;
+                w_got    <= 1'b0;
             end
-            
-            // Latch write data
-            if (s_wvalid && s_wready) begin
-                w_accepted <= 1'b1;
+
+            // Acceptances: AW has priority; AR only when nothing latched.
+            if (aw_ack) begin
+                addr_reg <= s_awaddr;
+                pend_wr  <= 1'b1;
+                have_req <= 1'b1;
+            end
+            if (w_ack) begin
                 wdata_reg <= s_wdata;
                 wstrb_reg <= s_wstrb;
+                w_got     <= 1'b1;
             end
-
-            // Latch read address
-            if (s_arvalid && s_arready && state == IDLE) begin
-                ar_accepted <= 1'b1;
+            if (ar_ack) begin
                 addr_reg <= s_araddr;
-            end
-
-            // Determine if it's a write or read
-            if (state == IDLE) begin
-                if (s_awvalid || aw_accepted) begin
-                    is_write <= 1'b1;
-                end else if (s_arvalid) begin
-                    is_write <= 1'b0;
-                end
-            end
-
-            // Clear acceptance flags when APB transaction finishes
-            if (state == ACCESS && pready) begin
-                aw_accepted <= 1'b0;
-                w_accepted  <= 1'b0;
-                ar_accepted <= 1'b0;
+                pend_wr  <= 1'b0;
+                have_req <= 1'b1;
             end
         end
     end
 
-    // Next state logic
+    // Next state logic: a write transfers only once its W beat is in hand,
+    // guaranteeing pwdata belongs to THIS address.
     always @(*) begin
         next_state = state;
         case (state)
             IDLE: begin
-                // Need both AW and W for write, or just AR for read
-                if ((s_awvalid || aw_accepted) && (s_wvalid || w_accepted)) begin
+                if (have_req && (!pend_wr || w_got))
                     next_state = SETUP;
-                end else if (s_arvalid || ar_accepted) begin
-                    next_state = SETUP;
-                end
             end
-            SETUP: begin
-                next_state = ACCESS;
-            end
-            ACCESS: begin
-                if (pready) begin
-                    next_state = IDLE;
-                end
-            end
+            SETUP:  next_state = ACCESS;
+            ACCESS: if (pready) next_state = IDLE;
             default: next_state = IDLE;
         endcase
     end
 
-    // AXI Ready Signals.
-    // Writes take priority; reads wait for outstanding write traffic.
-    // (Gating each channel on the *other* channel's valid — the Iteration 3
-    // scheme — deadlocked whenever a master raised AW and AR together.)
-    assign s_awready = (state == IDLE) && !aw_accepted;
-    assign s_wready  = (state == IDLE) && !w_accepted;
-    assign s_arready = (state == IDLE) && !ar_accepted &&
-                       !(s_awvalid || aw_accepted);
+    // AXI Ready Signals. Writes take priority (AW over AR) — enforced HERE,
+    // not just by if-order: with independent readys, AW+AR in the same cycle
+    // double-acked and the AR's NBA overwrote the AW latch, deadlocking the
+    // write whose W could then never be accepted.
+    assign s_awready = (state == IDLE) && !have_req;
+    assign s_wready  = (state == IDLE) && have_req && pend_wr && !w_got;
+    assign s_arready = (state == IDLE) && !have_req && !s_awvalid;
 
     // AXI Response Signals
     reg bvalid_reg;
@@ -163,7 +149,7 @@ module apb_bridge #(
             rdata_reg  <= {DW{1'b0}};
         end else begin
             // Write response
-            if (state == ACCESS && pready && is_write) begin
+            if (state == ACCESS && pready && pend_wr) begin
                 bvalid_reg <= 1'b1;
                 bresp_reg <= pslverr ? 2'b10 : 2'b00; // SLVERR -> SLVERR, else OKAY
             end else if (s_bready && bvalid_reg) begin
@@ -171,7 +157,7 @@ module apb_bridge #(
             end
 
             // Read response
-            if (state == ACCESS && pready && !is_write) begin
+            if (state == ACCESS && pready && !pend_wr) begin
                 rvalid_reg <= 1'b1;
                 rdata_reg <= prdata;
                 rresp_reg <= pslverr ? 2'b10 : 2'b00;
@@ -191,7 +177,7 @@ module apb_bridge #(
     // APB Signals
     assign psel    = (state == SETUP || state == ACCESS);
     assign penable = (state == ACCESS);
-    assign pwrite  = is_write;
+    assign pwrite  = pend_wr;
     assign paddr   = addr_reg;
     assign pwdata  = wdata_reg;
     assign pstrb   = wstrb_reg;

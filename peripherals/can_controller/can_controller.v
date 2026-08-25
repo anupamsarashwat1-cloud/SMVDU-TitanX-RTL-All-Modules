@@ -57,6 +57,15 @@ module can_controller (
             tx_dlc <= 32'h0;
             tx_data[0] <= 32'h0;
             tx_data[1] <= 32'h0;
+            // Readable registers must have a defined reset state — rx_* and
+            // the status/irq regs had no reset at all and read back X until
+            // the protocol engine (Phase 8) starts writing them.
+            stat_reg <= 32'h0;
+            irq_reg  <= 32'h0;
+            rx_id    <= 32'h0;
+            rx_dlc   <= 32'h0;
+            rx_data[0] <= 32'h0;
+            rx_data[1] <= 32'h0;
         end else if (psel && penable && pwrite) begin
             case (paddr[7:0])
                 8'h00: mode_reg <= pwdata;

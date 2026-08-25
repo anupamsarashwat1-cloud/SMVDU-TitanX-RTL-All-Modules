@@ -58,6 +58,9 @@ module envm_ctrl #(
             addr_reg <= 32'h0;
             data_reg <= 32'h0;
             unlock_reg <= 32'h0;
+            // Status is APB-readable (0x0C) — must have a defined reset state
+            // (idle, no error) instead of floating X until an engine exists.
+            stat_reg <= 32'h0;
         end else if (psel && penable && pwrite) begin
             case (paddr[7:0])
                 8'h00: cmd_reg <= pwdata;

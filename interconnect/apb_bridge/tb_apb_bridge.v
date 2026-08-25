@@ -75,6 +75,10 @@ module tb_apb_bridge();
         rst_n=0; repeat(6) @(posedge clk); rst_n=1; repeat(3) @(posedge clk);
 
         // TEST 1: AXI4-Lite Write transaction → APB write
+        // Protocol note: each channel's VALID must HOLD until its own
+        // handshake. (The original dropped WVALID one cycle after raising
+        // it — before any WREADY — withdrawing the beat; only a bridge
+        // that speculatively accepted W in the same cycle as AW survived.)
         $display("\n--- TEST 1: AXI Write → APB Write ---");
         @(posedge clk); #1;
         s_awvalid=1; s_awaddr=32'h0000_0100;
@@ -82,7 +86,11 @@ module tb_apb_bridge();
         wc=0;
         while (!s_awready && wc < 20) begin @(posedge clk); wc=wc+1; end
         if (wc < 20) begin
-            @(posedge clk); #1; s_awvalid=0; s_wvalid=0;
+            @(posedge clk); #1; s_awvalid=0;
+            // W beat: hold VALID until WREADY, accept, then drop
+            wc=0;
+            while (!s_wready && wc < 20) begin @(posedge clk); wc=wc+1; end
+            @(posedge clk); #1; s_wvalid=0;
             // APB should now assert psel+pwrite
             wc=0;
             while (!psel && wc < 10) begin @(posedge clk); wc=wc+1; end
