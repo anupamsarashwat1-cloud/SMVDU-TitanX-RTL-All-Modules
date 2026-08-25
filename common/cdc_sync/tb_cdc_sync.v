@@ -18,6 +18,16 @@ module tb_cdc_sync();
         .data_in(data_in), .data_out(data_out)
     );
 
+    // Second instance with a deeper chain: catches reset bugs on stages
+    // beyond index 1 (the original RTL hardcoded the reset for STAGES=2).
+    reg                  rst_n3;
+    reg  [WIDTH-1:0]     data_in3;
+    wire [WIDTH-1:0]     data_out3;
+    cdc_sync #(.WIDTH(WIDTH), .STAGES(3)) uut3 (
+        .dst_clk(dst_clk), .rst_n(rst_n3),
+        .data_in(data_in3), .data_out(data_out3)
+    );
+
     initial dst_clk = 0;
     always #5 dst_clk = ~dst_clk;
 
@@ -68,6 +78,39 @@ module tb_cdc_sync();
         data_in = 8'h00;
         repeat(3) @(posedge dst_clk);
         check(data_out, 8'h00, "data_out=0x00");
+
+        // TEST 6: STAGES=3 instance — reset state and propagation depth.
+        // Before the RTL fix, sync_ff[2] came out of reset X and this
+        // comparison failed on the first random value.
+        $display("\n--- TEST 6: STAGES=3 chain ---");
+        rst_n3 = 0; data_in3 = 8'h00;
+        repeat(4) @(posedge dst_clk); rst_n3 = 1;
+        @(posedge dst_clk); #1;
+        check(data_out3, 8'h00, "STAGES=3 data_out=0 after its reset");
+        data_in3 = 8'hC3;
+        repeat(4) @(posedge dst_clk); #1;   // 3 stages + margin
+        check(data_out3, 8'hC3, "STAGES=3 propagates after 4 cycles");
+
+        // TEST 7: Randomized multi-bit coherency — values must arrive
+        // intact (no partial updates) on both instances.
+        $display("\n--- TEST 7: Randomized coherency sweep ---");
+        begin : sweep
+            integer k, n_err;
+            reg [WIDTH-1:0] exp2, exp3, d2, d3;
+            n_err = 0;
+            for (k = 0; k < 32; k = k + 1) begin
+                d2 = $random; d3 = $random;
+                data_in = d2; data_in3 = d3;
+                repeat(4) @(posedge dst_clk); #1;
+                if (data_out !== d2 || data_out3 !== d3) begin
+                    $display("FAIL [%0t] sweep[%0d]: st2 got=0x%02X exp=0x%02X | st3 got=0x%02X exp=0x%02X",
+                             $time, k, data_out, d2, data_out3, d3);
+                    n_err = n_err + 1;
+                end
+            end
+            if (n_err == 0) $display("PASS [%0t] 32 randomized values coherent through both chains", $time);
+            error_count = error_count + n_err;
+        end
 
         $display("\n==============================");
         if (error_count == 0)
