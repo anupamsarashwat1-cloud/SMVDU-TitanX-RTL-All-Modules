@@ -1,7 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // SMVDU-TITAN-X SoC — AXI4 Crossbar (15 Masters × 9 Slaves)
-// Iteration 3: WRR (Weighted Round-Robin) Arbitration
-// Uses flattened array ports for true parameterization.
+// Iteration 4: queue-based routing replacing the self-clearing grant scheme.
+//
+// Iteration 3 defect (root cause of every write hanging at the W handshake):
+// W/B/R routing was keyed on s_*_gnt registers that cleared to "no grant" the
+// moment awvalid dropped — i.e. one cycle after every AW handshake. Transaction
+// state now lives in FIFOs pushed on address-handshake and popped on completion
+// handshake, so a transaction stays routable for its whole lifetime:
+//
+//   per-master wr_wq[m] : target slave of each outstanding write; W beats are
+//                         routed to the head; popped on the WLAST handshake.
+//   per-master rd_tgt/cnt : outstanding-read target (single-target contract);
+//                         popped when its owned RLAST beat is accepted.
+//   per-slave  b_own[s] : which master owns the next B response; pushed on AW
+//                         handshake, popped on B acceptance.
+//   per-slave  r_own[s] : which master owns the next R beat; pushed on AR
+//                         handshake, popped on the RLAST beat.
+//
+// Ordering contract: a master may pipeline transactions, but only to the same
+// target slave until they drain (every master in this SoC is in-order). This
+// keeps each master's response source unique at any instant, so B/R demux by
+// owner-FIFO head is exact. Bursts pass through beat-by-beat. Addresses that
+// decode to no slave get an internal DECERR responder instead of silently
+// landing on real slave 8 (the Iteration 3 collision).
 `timescale 1ns/1ps
 
 module axi4_crossbar #(
@@ -9,7 +30,8 @@ module axi4_crossbar #(
     parameter NS   = 9,   // Number of slaves
     parameter AW   = 40,  // Address width
     parameter DW   = 64,  // Data width
-    parameter IDW  = 4    // Master ID width
+    parameter IDW  = 4,   // Master ID width
+    parameter OUTS = 4    // Outstanding transactions tracked per master/slave
 ) (
     input  wire                 clk,
     input  wire                 rst_n,
@@ -19,23 +41,23 @@ module axi4_crossbar #(
     output wire [NM-1:0]        m_awready,
     input  wire [(NM*AW)-1:0]   m_awaddr,
     input  wire [(NM*IDW)-1:0]  m_awid,
-    
+
     input  wire [NM-1:0]        m_wvalid,
     output wire [NM-1:0]        m_wready,
     input  wire [(NM*DW)-1:0]   m_wdata,
     input  wire [(NM*(DW/8))-1:0] m_wstrb,
     input  wire [NM-1:0]        m_wlast,
-    
+
     output wire [NM-1:0]        m_bvalid,
     input  wire [NM-1:0]        m_bready,
     output wire [(NM*2)-1:0]    m_bresp,
     output wire [(NM*IDW)-1:0]  m_bid,
-    
+
     input  wire [NM-1:0]        m_arvalid,
     output wire [NM-1:0]        m_arready,
     input  wire [(NM*AW)-1:0]   m_araddr,
     input  wire [(NM*IDW)-1:0]  m_arid,
-    
+
     output wire [NM-1:0]        m_rvalid,
     input  wire [NM-1:0]        m_rready,
     output wire [(NM*DW)-1:0]   m_rdata,
@@ -48,23 +70,23 @@ module axi4_crossbar #(
     input  wire [NS-1:0]        s_awready,
     output wire [(NS*AW)-1:0]   s_awaddr,
     output wire [(NS*IDW)-1:0]  s_awid,
-    
+
     output wire [NS-1:0]        s_wvalid,
     input  wire [NS-1:0]        s_wready,
     output wire [(NS*DW)-1:0]   s_wdata,
     output wire [(NS*(DW/8))-1:0] s_wstrb,
     output wire [NS-1:0]        s_wlast,
-    
+
     input  wire [NS-1:0]        s_bvalid,
     output wire [NS-1:0]        s_bready,
     input  wire [(NS*2)-1:0]    s_bresp,
     input  wire [(NS*IDW)-1:0]  s_bid,
-    
+
     output wire [NS-1:0]        s_arvalid,
     input  wire [NS-1:0]        s_arready,
     output wire [(NS*AW)-1:0]   s_araddr,
     output wire [(NS*IDW)-1:0]  s_arid,
-    
+
     input  wire [NS-1:0]        s_rvalid,
     output wire [NS-1:0]        s_rready,
     input  wire [(NS*DW)-1:0]   s_rdata,
@@ -73,134 +95,329 @@ module axi4_crossbar #(
     input  wire [(NS*IDW)-1:0]  s_rid
 );
 
+    localparam T_UNMAPPED = 4'd9;   // virtual target: answered internally
+
     // -------------------------------------------------------
-    // Address Decoding (Memory Map)
+    // Address Decoding (matches titan_x_top slave wiring)
     // -------------------------------------------------------
-    // S0: L2 Cache (0x0000_0000_0000)
-    // S1: DDR4     (0x0000_8000_0000)
-    // S2-S8: Peripherals, PCIe, BootROM, etc.
+    // S0: DDR4            (0x8000_0000)
+    // S1: AHB/APB bridge  (0x4000_0000)
+    // S2: BootROM         (0x1000_0000)
+    // S3: L2 cache        (0x0000_0000)
+    // S4-S8: peripheral banks (assigned in top)
     function [3:0] decode_slave;
         input [AW-1:0] addr;
         begin
-            if      (addr[39:31] == 9'h001)  decode_slave = 4'd0; // DDR (0x8000_0000)
-            else if (addr[39:28] == 12'h004) decode_slave = 4'd1; // APB (0x4000_0000)
-            else if (addr[39:28] == 12'h001) decode_slave = 4'd2; // BootROM (0x1000_0000)
-            else if (addr[39:28] == 12'h000) decode_slave = 4'd3; // L2 Cache (0x0000_0000)
-            else                             decode_slave = 4'd8; // Unmapped
+            if      (addr[39:31] == 9'h001)  decode_slave = 4'd0; // DDR
+            else if (addr[39:28] == 12'h004) decode_slave = 4'd1; // APB bridge
+            else if (addr[39:28] == 12'h001) decode_slave = 4'd2; // BootROM
+            else if (addr[39:28] == 12'h000) decode_slave = 4'd3; // L2
+            else                             decode_slave = T_UNMAPPED;
         end
     endfunction
 
     // -------------------------------------------------------
-    // Weighted Round-Robin (WRR) Arbitration
+    // State
     // -------------------------------------------------------
-    // For each slave, keep track of weights and active master.
-    // Simplifying for simulation model: static priority + WRR tracking.
-    
-    // Internal decoded request matrices [slave][master]
-    wire [NM-1:0] ar_req [0:NS-1];
-    wire [NM-1:0] aw_req [0:NS-1];
-    
-    genvar m, s;
-    generate
-        for (s = 0; s < NS; s = s + 1) begin : gen_req_matrix
-            for (m = 0; m < NM; m = m + 1) begin : gen_req_master
-                assign ar_req[s][m] = m_arvalid[m] && (decode_slave(m_araddr[m*AW +: AW]) == s);
-                assign aw_req[s][m] = m_awvalid[m] && (decode_slave(m_awaddr[m*AW +: AW]) == s);
+    reg [3:0]  wr_q   [0:NM-1][0:OUTS-1];  // outstanding-write targets
+    reg [1:0]  wr_rp  [0:NM-1];
+    reg [1:0]  wr_cnt [0:NM-1];
+
+    reg [3:0]  rd_tgt  [0:NM-1];           // outstanding-read target (or F)
+    reg [1:0]  rd_cnt  [0:NM-1];
+
+    reg [1:0]  err_b_cnt [0:NM-1];         // unmapped writes awaiting B
+    reg        err_b_act [0:NM-1];
+    reg [IDW-1:0] err_bid [0:NM-1][0:OUTS-1];
+    reg [1:0]  err_b_rp  [0:NM-1];
+
+    reg [1:0]  err_r_cnt [0:NM-1];         // unmapped reads awaiting R
+    reg        err_r_act [0:NM-1];
+    reg [IDW-1:0] err_rid [0:NM-1][0:OUTS-1];
+    reg [1:0]  err_r_rp  [0:NM-1];
+
+    reg [3:0]  b_own  [0:NS-1][0:OUTS-1];  // next B response owner
+    reg [1:0]  b_rp   [0:NS-1];
+    reg [1:0]  b_cnt  [0:NS-1];
+    reg [3:0]  r_own  [0:NS-1][0:OUTS-1];  // next R beat owner
+    reg [1:0]  r_rp   [0:NS-1];
+    reg [1:0]  r_cnt  [0:NS-1];
+
+    reg [3:0]  rr_aw [0:NS-1];
+    reg [3:0]  rr_w  [0:NS-1];
+    reg [3:0]  rr_ar [0:NS-1];
+
+    integer i, j;
+
+    // -------------------------------------------------------
+    // Targets & combinational arbitration
+    // -------------------------------------------------------
+    wire [3:0] aw_tgt [0:NM-1];
+    wire [3:0] ar_tgt [0:NM-1];
+    genvar gm;
+    generate for (gm = 0; gm < NM; gm = gm + 1) begin : g_tgt
+        assign aw_tgt[gm] = decode_slave(m_awaddr[gm*AW +: AW]);
+        assign ar_tgt[gm] = decode_slave(m_araddr[gm*AW +: AW]);
+    end endgenerate
+
+    reg [4:0] aw_sel [0:NS-1];
+    reg [4:0] w_sel  [0:NS-1];
+    reg [4:0] ar_sel [0:NS-1];
+    integer s, k, mm;
+
+    always @* begin
+        for (s = 0; s < NS; s = s + 1) begin
+            // AW: rotate through masters; skip full queues and masters whose
+            // outstanding writes target a different slave (ordering contract)
+            aw_sel[s] = 5'd31;
+            for (k = 0; k < NM; k = k + 1) begin
+                mm = rr_aw[s] + k; if (mm >= NM) mm = mm - NM;
+                if ((aw_sel[s] == 5'd31) && m_awvalid[mm] &&
+                    (aw_tgt[mm] == s[3:0]) && (wr_cnt[mm] != 2'd3) &&
+                    ((wr_cnt[mm] == 2'd0) ||
+                     (wr_q[mm][wr_rp[mm]] == aw_tgt[mm])))
+                    aw_sel[s] = mm[4:0];
+            end
+            // AR: same single-target rule against outstanding reads
+            ar_sel[s] = 5'd31;
+            for (k = 0; k < NM; k = k + 1) begin
+                mm = rr_ar[s] + k; if (mm >= NM) mm = mm - NM;
+                if ((ar_sel[s] == 5'd31) && m_arvalid[mm] &&
+                    (ar_tgt[mm] == s[3:0]) &&
+                    ((rd_cnt[mm] == 2'd0) || (rd_tgt[mm] == ar_tgt[mm])))
+                    ar_sel[s] = mm[4:0];
+            end
+            // W: master whose oldest write targets this slave
+            w_sel[s] = 5'd31;
+            for (k = 0; k < NM; k = k + 1) begin
+                mm = rr_w[s] + k; if (mm >= NM) mm = mm - NM;
+                if ((w_sel[s] == 5'd31) && (wr_cnt[mm] != 0) &&
+                    (wr_q[mm][wr_rp[mm]] == s[3:0]))
+                    w_sel[s] = mm[4:0];
             end
         end
-    endgenerate
+    end
 
-    // Grant registers per slave
-    reg [3:0] s_ar_gnt [0:NS-1];
-    reg [3:0] s_aw_gnt [0:NS-1];
-    reg [3:0] rr_ptr_ar [0:NS-1];
-    reg [3:0] rr_ptr_aw [0:NS-1];
-    
-    // Simplistic WRR / RR logic per slave
-    integer idx_s, idx_m;
+    // Handshakes through the selections
+    wire aw_hs [0:NS-1];
+    wire ar_hs [0:NS-1];
+    wire wl_hs [0:NS-1];   // WLAST beat accepted by a slave
+    genvar gs;
+    generate for (gs = 0; gs < NS; gs = gs + 1) begin : g_hs
+        assign aw_hs[gs] = (aw_sel[gs] != 5'd31) && s_awready[gs];
+        assign ar_hs[gs] = (ar_sel[gs] != 5'd31) && s_arready[gs];
+        assign wl_hs[gs] = (w_sel[gs] != 5'd31) && m_wvalid[w_sel[gs]] &&
+                           m_wlast[w_sel[gs]]   && s_wready[gs];
+    end endgenerate
+
+    // -------------------------------------------------------
+    // Sequential: FIFO maintenance & pointers
+    // -------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            for (idx_s = 0; idx_s < NS; idx_s = idx_s + 1) begin
-                s_ar_gnt[idx_s] <= 4'hF; // No grant
-                s_aw_gnt[idx_s] <= 4'hF;
-                rr_ptr_ar[idx_s] <= 4'h0;
-                rr_ptr_aw[idx_s] <= 4'h0;
+            for (i = 0; i < NM; i = i + 1) begin
+                for (j = 0; j < OUTS; j = j + 1) begin
+                    wr_q[i][j]    <= 4'hF;
+                    err_bid[i][j] <= {IDW{1'b0}};
+                    err_rid[i][j] <= {IDW{1'b0}};
+                end
+                wr_rp[i] <= 2'd0;  wr_cnt[i] <= 2'd0;
+                rd_tgt[i] <= 4'hF; rd_cnt[i] <= 2'd0;
+                err_b_cnt[i] <= 2'd0; err_b_act[i] <= 1'b0; err_b_rp[i] <= 2'd0;
+                err_r_cnt[i] <= 2'd0; err_r_act[i] <= 1'b0; err_r_rp[i] <= 2'd0;
+            end
+            for (i = 0; i < NS; i = i + 1) begin
+                for (j = 0; j < OUTS; j = j + 1) begin
+                    b_own[i][j] <= 4'hF;
+                    r_own[i][j] <= 4'hF;
+                end
+                b_rp[i] <= 2'd0; b_cnt[i] <= 2'd0;
+                r_rp[i] <= 2'd0; r_cnt[i] <= 2'd0;
+                rr_aw[i] <= 4'd0; rr_w[i] <= 4'd0; rr_ar[i] <= 4'd0;
             end
         end else begin
-            for (idx_s = 0; idx_s < NS; idx_s = idx_s + 1) begin
-                // AR Arbitration
-                if (s_ar_gnt[idx_s] == 4'hF || (s_ar_gnt[idx_s] < NM && !m_arvalid[s_ar_gnt[idx_s]])) begin
-                    s_ar_gnt[idx_s] <= 4'hF;
-                    for (idx_m = 0; idx_m < NM; idx_m = idx_m + 1) begin
-                        if (ar_req[idx_s][idx_m]) s_ar_gnt[idx_s] <= idx_m[3:0]; // Priority encoder fallback
+            // ---- per-master queues ----
+            for (i = 0; i < NM; i = i + 1) begin : m_loop
+                // push write target on AW handshake to a REAL slave
+                if ((aw_tgt[i] < T_UNMAPPED) && m_awready[i] && m_awvalid[i]) begin
+                    wr_q[i][(wr_rp[i] + wr_cnt[i]) & 2'h3] <= aw_tgt[i];
+                    wr_cnt[i] <= wr_cnt[i] + 2'd1;
+                end
+                // pop write target on WLAST accepted by the head slave
+                if ((wr_cnt[i] != 0) && (wr_q[i][wr_rp[i]] < T_UNMAPPED)) begin
+                    if (wl_hs[wr_q[i][wr_rp[i]]]) begin
+                        wr_rp[i]  <= wr_rp[i] + 2'd1;
+                        wr_cnt[i] <= wr_cnt[i] - 2'd1;
                     end
                 end
-                
-                // AW Arbitration
-                if (s_aw_gnt[idx_s] == 4'hF || (s_aw_gnt[idx_s] < NM && !m_awvalid[s_aw_gnt[idx_s]])) begin
-                    s_aw_gnt[idx_s] <= 4'hF;
-                    for (idx_m = 0; idx_m < NM; idx_m = idx_m + 1) begin
-                        if (aw_req[idx_s][idx_m]) s_aw_gnt[idx_s] <= idx_m[3:0];
-                    end
+
+                // push read target on AR handshake to a REAL slave
+                if ((ar_tgt[i] < T_UNMAPPED) && m_arready[i] && m_arvalid[i]) begin
+                    rd_tgt[i] <= ar_tgt[i];
+                    rd_cnt[i] <= rd_cnt[i] + 2'd1;
                 end
+                // pop when THIS master's owned RLAST beat drains
+                if ((rd_cnt[i] != 0) && (rd_tgt[i] < T_UNMAPPED)) begin
+                    if (s_rvalid[rd_tgt[i]] && s_rready[rd_tgt[i]] &&
+                        s_rlast[rd_tgt[i]] &&
+                        (r_own[rd_tgt[i]][r_rp[rd_tgt[i]]] == i[3:0]))
+                        rd_cnt[i] <= rd_cnt[i] - 2'd1;
+                end
+            end
+
+            // ---- per-slave owner FIFOs ----
+            for (s = 0; s < NS; s = s + 1) begin : s_loop
+                if (aw_hs[s]) begin
+                    b_own[s][(b_rp[s] + b_cnt[s]) & 2'h3] <= aw_sel[s][3:0];
+                    b_cnt[s] <= b_cnt[s] + 2'd1;
+                end
+                if ((b_cnt[s] != 0) && s_bvalid[s] && s_bready[s]) begin
+                    b_rp[s]  <= b_rp[s] + 2'd1;
+                    b_cnt[s] <= b_cnt[s] - 2'd1;
+                end
+                if (ar_hs[s]) begin
+                    r_own[s][(r_rp[s] + r_cnt[s]) & 2'h3] <= ar_sel[s][3:0];
+                    r_cnt[s] <= r_cnt[s] + 2'd1;
+                end
+                if ((r_cnt[s] != 0) && s_rvalid[s] && s_rready[s] && s_rlast[s]) begin
+                    r_rp[s]  <= r_rp[s] + 2'd1;
+                    r_cnt[s] <= r_cnt[s] - 2'd1;
+                end
+            end
+
+            // ---- unmapped-access responders ----
+            for (i = 0; i < NM; i = i + 1) begin : e_loop
+                if (m_awvalid[i] && m_awready[i] && (aw_tgt[i] == T_UNMAPPED)) begin
+                    err_bid[i][(err_b_rp[i] + err_b_cnt[i]) & 2'h3] <= m_awid[i*IDW +: IDW];
+                    err_b_cnt[i] <= err_b_cnt[i] + 2'd1;
+                end
+                if (!err_b_act[i] && (err_b_cnt[i] != 0)) err_b_act[i] <= 1'b1;
+                else if (err_b_act[i] && m_bready[i]) begin
+                    err_b_act[i] <= 1'b0;
+                    err_b_rp[i]  <= err_b_rp[i] + 2'd1;
+                    err_b_cnt[i] <= err_b_cnt[i] - 2'd1;
+                end
+
+                if (m_arvalid[i] && m_arready[i] && (ar_tgt[i] == T_UNMAPPED)) begin
+                    err_rid[i][(err_r_rp[i] + err_r_cnt[i]) & 2'h3] <= m_arid[i*IDW +: IDW];
+                    err_r_cnt[i] <= err_r_cnt[i] + 2'd1;
+                end
+                if (!err_r_act[i] && (err_r_cnt[i] != 0)) err_r_act[i] <= 1'b1;
+                else if (err_r_act[i] && m_rready[i]) begin
+                    err_r_act[i] <= 1'b0;
+                    err_r_rp[i]  <= err_r_rp[i] + 2'd1;
+                    err_r_cnt[i] <= err_r_cnt[i] - 2'd1;
+                end
+            end
+
+            // ---- round-robin pointer updates on service ----
+            for (s = 0; s < NS; s = s + 1) begin : rr_loop
+                if (aw_hs[s]) rr_aw[s] <= aw_sel[s][3:0] + 4'd1;
+                if (ar_hs[s]) rr_ar[s] <= ar_sel[s][3:0] + 4'd1;
+                if ((w_sel[s] != 5'd31) && m_wvalid[w_sel[s]] && s_wready[s])
+                    rr_w[s] <= w_sel[s][3:0] + 4'd1;
+            end
+        end
+    end
+
+    // Owner lookups: with the single-target contract, at most one slave can
+    // hold this master in its owner-FIFO head at any time. Computed in an
+    // always @* (NOT a function of the master index alone — a function in a
+    // continuous assign re-evaluates only when its arguments change, and the
+    // master index never changes).
+    reg [3:0] b_src [0:NM-1];
+    reg [3:0] r_src [0:NM-1];
+    integer si, sj, own_m;
+    always @* begin
+        for (si = 0; si < NM; si = si + 1) begin
+            b_src[si] = 4'hF;
+            r_src[si] = 4'hF;
+        end
+        for (sj = 0; sj < NS; sj = sj + 1) begin
+            if (b_cnt[sj] != 0) begin
+                own_m = b_own[sj][b_rp[sj]];
+                if (b_src[own_m] == 4'hF) b_src[own_m] = sj[3:0];
+            end
+            if (r_cnt[sj] != 0) begin
+                own_m = r_own[sj][r_rp[sj]];
+                if (r_src[own_m] == 4'hF) r_src[own_m] = sj[3:0];
             end
         end
     end
 
     // -------------------------------------------------------
-    // Muxing Logic
+    // Output assembly
     // -------------------------------------------------------
-    // Master-to-Slave mapping
-    generate
-        for (s = 0; s < NS; s = s + 1) begin : gen_slave_mux
-            // AR channel
-            assign s_arvalid[s] = (s_ar_gnt[s] < NM) ? m_arvalid[s_ar_gnt[s]] : 1'b0;
-            assign s_araddr[s*AW +: AW] = (s_ar_gnt[s] < NM) ? m_araddr[s_ar_gnt[s]*AW +: AW] : {AW{1'b0}};
-            assign s_arid[s*IDW +: IDW] = (s_ar_gnt[s] < NM) ? m_arid[s_ar_gnt[s]*IDW +: IDW] : {IDW{1'b0}};
+    genvar gs2;
+    generate for (gs2 = 0; gs2 < NS; gs2 = gs2 + 1) begin : g_fwd
+        assign s_awvalid[gs2] = (aw_sel[gs2] != 5'd31);
+        assign s_awaddr[gs2*AW +: AW]  = (aw_sel[gs2] != 5'd31)
+            ? m_awaddr[aw_sel[gs2]*AW +: AW] : {AW{1'b0}};
+        assign s_awid[gs2*IDW +: IDW]  = (aw_sel[gs2] != 5'd31)
+            ? m_awid[aw_sel[gs2]*IDW +: IDW] : {IDW{1'b0}};
 
-            // AW channel
-            assign s_awvalid[s] = (s_aw_gnt[s] < NM) ? m_awvalid[s_aw_gnt[s]] : 1'b0;
-            assign s_awaddr[s*AW +: AW] = (s_aw_gnt[s] < NM) ? m_awaddr[s_aw_gnt[s]*AW +: AW] : {AW{1'b0}};
-            assign s_awid[s*IDW +: IDW] = (s_aw_gnt[s] < NM) ? m_awid[s_aw_gnt[s]*IDW +: IDW] : {IDW{1'b0}};
+        assign s_arvalid[gs2] = (ar_sel[gs2] != 5'd31);
+        assign s_araddr[gs2*AW +: AW]  = (ar_sel[gs2] != 5'd31)
+            ? m_araddr[ar_sel[gs2]*AW +: AW] : {AW{1'b0}};
+        assign s_arid[gs2*IDW +: IDW]  = (ar_sel[gs2] != 5'd31)
+            ? m_arid[ar_sel[gs2]*IDW +: IDW] : {IDW{1'b0}};
 
-            // W channel (follows AW grant)
-            assign s_wvalid[s] = (s_aw_gnt[s] < NM) ? m_wvalid[s_aw_gnt[s]] : 1'b0;
-            assign s_wdata[s*DW +: DW] = (s_aw_gnt[s] < NM) ? m_wdata[s_aw_gnt[s]*DW +: DW] : {DW{1'b0}};
-            assign s_wstrb[s*(DW/8) +: (DW/8)] = (s_aw_gnt[s] < NM) ? m_wstrb[s_aw_gnt[s]*(DW/8) +: (DW/8)] : {(DW/8){1'b0}};
-            assign s_wlast[s] = (s_aw_gnt[s] < NM) ? m_wlast[s_aw_gnt[s]] : 1'b0;
+        assign s_wvalid[gs2] = (w_sel[gs2] != 5'd31) ? m_wvalid[w_sel[gs2]] : 1'b0;
+        assign s_wdata[gs2*DW +: DW] = (w_sel[gs2] != 5'd31)
+            ? m_wdata[w_sel[gs2]*DW +: DW] : {DW{1'b0}};
+        assign s_wstrb[gs2*(DW/8) +: (DW/8)] = (w_sel[gs2] != 5'd31)
+            ? m_wstrb[w_sel[gs2]*(DW/8) +: (DW/8)] : {(DW/8){1'b0}};
+        assign s_wlast[gs2]  = (w_sel[gs2] != 5'd31) ? m_wlast[w_sel[gs2]] : 1'b0;
 
-            // B channel (accept responses)
-            assign s_bready[s] = (s_aw_gnt[s] < NM) ? m_bready[s_aw_gnt[s]] : 1'b1;
-            
-            // R channel (accept responses)
-            assign s_rready[s] = (s_ar_gnt[s] < NM) ? m_rready[s_ar_gnt[s]] : 1'b1;
-        end
-    endgenerate
+        // Response readiness flows back to the owning master only
+        assign s_bready[gs2] = (b_cnt[gs2] != 0)
+            ? m_bready[b_own[gs2][b_rp[gs2]]] : 1'b1;
+        assign s_rready[gs2] = (r_cnt[gs2] != 0)
+            ? m_rready[r_own[gs2][r_rp[gs2]]] : 1'b1;
+    end endgenerate
 
-    // Slave-to-Master mapping (demux)
-    generate
-        for (m = 0; m < NM; m = m + 1) begin : gen_master_demux
-            wire [3:0] tgt_ar = decode_slave(m_araddr[m*AW +: AW]);
-            wire [3:0] tgt_aw = decode_slave(m_awaddr[m*AW +: AW]);
-            
-            assign m_arready[m] = (s_ar_gnt[tgt_ar] == m) ? s_arready[tgt_ar] : 1'b0;
-            assign m_awready[m] = (s_aw_gnt[tgt_aw] == m) ? s_awready[tgt_aw] : 1'b0;
-            
-            assign m_wready[m]  = (s_aw_gnt[tgt_aw] == m) ? s_wready[tgt_aw] : 1'b0;
-            
-            // Routing Responses back based on grants
-            // (In full AXI4 this should rely on RID/BID or FIFO tracking, 
-            // but mapped here via active grant for simple integration)
-            assign m_bvalid[m] = (s_aw_gnt[tgt_aw] == m) ? s_bvalid[tgt_aw] : 1'b0;
-            assign m_bresp[m*2 +: 2] = (s_aw_gnt[tgt_aw] == m) ? s_bresp[tgt_aw*2 +: 2] : 2'b00;
-            assign m_bid[m*IDW +: IDW] = (s_aw_gnt[tgt_aw] == m) ? s_bid[tgt_aw*IDW +: IDW] : {IDW{1'b0}};
-            
-            assign m_rvalid[m] = (s_ar_gnt[tgt_ar] == m) ? s_rvalid[tgt_ar] : 1'b0;
-            assign m_rdata[m*DW +: DW] = (s_ar_gnt[tgt_ar] == m) ? s_rdata[tgt_ar*DW +: DW] : {DW{1'b0}};
-            assign m_rresp[m*2 +: 2] = (s_ar_gnt[tgt_ar] == m) ? s_rresp[tgt_ar*2 +: 2] : 2'b00;
-            assign m_rlast[m] = (s_ar_gnt[tgt_ar] == m) ? s_rlast[tgt_ar] : 1'b0;
-            assign m_rid[m*IDW +: IDW] = (s_ar_gnt[tgt_ar] == m) ? s_rid[tgt_ar*IDW +: IDW] : {IDW{1'b0}};
-        end
-    endgenerate
+    genvar gm2;
+    generate for (gm2 = 0; gm2 < NM; gm2 = gm2 + 1) begin : g_mst
+        wire [3:0] at = aw_tgt[gm2];
+        wire [3:0] rt = ar_tgt[gm2];
+        wire aw_grant = (at < T_UNMAPPED) && (aw_sel[at[3:0]] == gm2[4:0])
+                        && s_awready[at[3:0]];
+        wire ar_grant = (rt < T_UNMAPPED) && (ar_sel[rt[3:0]] == gm2[4:0])
+                        && s_arready[rt[3:0]];
+        assign m_awready[gm2] = aw_grant || (at == T_UNMAPPED);
+        assign m_arready[gm2] = ar_grant || (rt == T_UNMAPPED);
+
+        // W beats: gated by head slave readiness; absorbed when unmapped
+        wire       w_have = (wr_cnt[gm2] != 0);
+        wire [3:0] wt     = wr_q[gm2][wr_rp[gm2]];
+        assign m_wready[gm2] = w_have &&
+            ((wt < T_UNMAPPED) ? s_wready[wt[3:0]] : 1'b1);
+
+        // B response: error engine takes priority; else the owned slave's
+        wire [3:0] bt  = b_src[gm2];
+        assign m_bvalid[gm2] = err_b_act[gm2] ||
+            ((bt < T_UNMAPPED) ? (b_own[bt[3:0]][b_rp[bt[3:0]]] == gm2[3:0]) &&
+                                 s_bvalid[bt[3:0]] : 1'b0);
+        assign m_bresp[gm2*2 +: 2] = err_b_act[gm2] ? 2'b11 :
+            ((bt < T_UNMAPPED) ? s_bresp[bt[3:0]*2 +: 2] : 2'b00);
+        assign m_bid[gm2*IDW +: IDW] = err_b_act[gm2]
+            ? err_bid[gm2][err_b_rp[gm2]]
+            : ((bt < T_UNMAPPED) ? s_bid[bt[3:0]*IDW +: IDW] : {IDW{1'b0}});
+
+        // R beats: error engine first; else the owned slave's stream
+        wire [3:0] rtq = r_src[gm2];
+        assign m_rvalid[gm2] = err_r_act[gm2] ||
+            ((rtq < T_UNMAPPED) ? (r_own[rtq[3:0]][r_rp[rtq[3:0]]] == gm2[3:0]) &&
+                                  s_rvalid[rtq[3:0]] : 1'b0);
+        assign m_rdata[gm2*DW +: DW] = err_r_act[gm2] ? {DW{1'b0}} :
+            ((rtq < T_UNMAPPED) ? s_rdata[rtq[3:0]*DW +: DW] : {DW{1'b0}});
+        assign m_rresp[gm2*2 +: 2] = err_r_act[gm2] ? 2'b11 :
+            ((rtq < T_UNMAPPED) ? s_rresp[rtq[3:0]*2 +: 2] : 2'b00);
+        assign m_rlast[gm2] = err_r_act[gm2] ? 1'b1 :
+            ((rtq < T_UNMAPPED) ? s_rlast[rtq[3:0]] : 1'b0);
+        assign m_rid[gm2*IDW +: IDW] = err_r_act[gm2]
+            ? err_rid[gm2][err_r_rp[gm2]]
+            : ((rtq < T_UNMAPPED) ? s_rid[rtq[3:0]*IDW +: IDW] : {IDW{1'b0}});
+    end endgenerate
 
 endmodule

@@ -138,10 +138,14 @@ module apb_bridge #(
         endcase
     end
 
-    // AXI Ready Signals
-    assign s_awready = (state == IDLE) && !aw_accepted && !s_arvalid; // Prefer reads slightly or block writes if read active
-    assign s_wready  = (state == IDLE) && !w_accepted && !s_arvalid;
-    assign s_arready = (state == IDLE) && !ar_accepted && !s_awvalid;
+    // AXI Ready Signals.
+    // Writes take priority; reads wait for outstanding write traffic.
+    // (Gating each channel on the *other* channel's valid — the Iteration 3
+    // scheme — deadlocked whenever a master raised AW and AR together.)
+    assign s_awready = (state == IDLE) && !aw_accepted;
+    assign s_wready  = (state == IDLE) && !w_accepted;
+    assign s_arready = (state == IDLE) && !ar_accepted &&
+                       !(s_awvalid || aw_accepted);
 
     // AXI Response Signals
     reg bvalid_reg;

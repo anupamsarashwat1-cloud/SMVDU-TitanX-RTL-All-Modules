@@ -87,23 +87,30 @@ module ddr_ctrl_top (
     reg  s_bvalid_r,  s_rvalid_r,  s_rlast_r;
     reg [63:0] s_rdata_r;
     reg [3:0]  s_rid_r, s_bid_r;
+    reg [1:0]  s_rresp_r, s_bresp_r;
 
     assign s_arready = s_arready_r && init_done && !ref_req;
     assign s_awready = s_awready_r && init_done && !ref_req;
     assign s_wready  = s_wready_r;
     assign s_bvalid  = s_bvalid_r;
-    assign s_bresp   = 2'h0;
+    assign s_bresp   = s_bresp_r;
     assign s_bid     = s_bid_r;
     assign s_rvalid  = s_rvalid_r;
     assign s_rdata   = s_rdata_r;
-    assign s_rresp   = 2'h0;
+    assign s_rresp   = s_rresp_r;
     assign s_rlast   = s_rlast_r;
     assign s_rid     = s_rid_r;
 
     wire       sched_ready;
+    wire       sched_cmd_done;
     wire [63:0] sched_rddata;
     wire        sched_rdvalid;
-    reg         sched_cmd_valid;
+    // BUG-DDR-004: commands are issued as a HELD pending flag, not a 1-cycle
+    // pulse. A pulse silently vanished whenever the scheduler was busy, and
+    // the write still answered OKAY — data loss with a success response.
+    reg         cmd_pend;
+    wire        cmd_fire = cmd_pend && sched_ready; // scheduler accepts this edge
+    assign      sched_cmd_valid = cmd_pend;         // legacy name for traces
     reg [1:0]   sched_cmd_type; // 0=RD, 1=WR, 2=REF
     reg [2:0]   sched_bank;
     reg [1:0]   sched_bg;
@@ -111,7 +118,12 @@ module ddr_ctrl_top (
     reg [9:0]   sched_col;
     reg [63:0]  sched_wrdata;
 
-    assign ref_ack = (sched_cmd_valid && sched_cmd_type == 2'd2); // BUG-DDR-002: ack immediately on refresh issue
+    // Watchdog: a stuck scheduler must degrade to a bounded SLVERR response,
+    // never a permanent bus wedge (the failure that hid all later checks).
+    localparam WD_LIMIT = 16'd4096;
+    reg [15:0] wd_cnt;
+
+    assign ref_ack = cmd_fire && (sched_cmd_type == 2'd2); // BUG-DDR-002: ack on refresh acceptance
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -122,24 +134,41 @@ module ddr_ctrl_top (
             s_bvalid_r   <= 1'b0;
             s_rvalid_r   <= 1'b0;
             s_rlast_r    <= 1'b0;
-            sched_cmd_valid <= 1'b0;
+            s_rresp_r    <= 2'h0;
+            s_bresp_r    <= 2'h0;
+            wd_cnt       <= 16'h0;
+            cmd_pend     <= 1'b0;
         end else if (!init_done) begin
             ctrl_state   <= CS_IDLE;
             // hold logic
         end else begin
-            sched_cmd_valid <= 1'b0;
             s_bvalid_r   <= 1'b0;
             s_rvalid_r   <= 1'b0;
+            s_rresp_r    <= 2'h0;
+            s_bresp_r    <= 2'h0;
 
-            if (ref_req && ctrl_state == CS_IDLE) begin
+            // Handshake completion: drop the pending flag exactly when the
+            // scheduler samples it (fire edge). Held valid + ready = a real
+            // valid/ready contract, so a busy scheduler delays instead of
+            // dropping.
+            if (cmd_fire)
+                cmd_pend <= 1'b0;
+
+            if (ref_req && ctrl_state == CS_IDLE && !cmd_pend) begin
                 sched_cmd_type  <= 2'd2; // REF
-                sched_cmd_valid <= 1'b1;
+                cmd_pend        <= 1'b1;
+`ifdef TB_CTRL_TRACE
+                $display("[CTRL] %0t issue REF", $time);
+`endif
             end else begin
                 case (ctrl_state)
                     CS_IDLE: begin
                         s_arready_r <= 1'b1;
                         s_awready_r <= 1'b1;
                         if (s_arvalid && !ref_req) begin
+`ifdef TB_CTRL_TRACE
+                            $display("[CTRL] %0t accept AR %h", $time, s_araddr);
+`endif
                             cmd_addr      <= s_araddr;
                             cmd_id        <= s_arid;
                             s_arready_r   <= 1'b0;
@@ -149,9 +178,13 @@ module ddr_ctrl_top (
                             sched_row     <= s_araddr[32:17];
                             sched_col     <= s_araddr[11:2];
                             sched_cmd_type<= 2'd0; // READ
-                            sched_cmd_valid <= 1'b1;
+                            cmd_pend      <= 1'b1;
+                            wd_cnt        <= WD_LIMIT;
                             ctrl_state    <= CS_READ;
                         end else if (s_awvalid && !ref_req) begin
+`ifdef TB_CTRL_TRACE
+                            $display("[CTRL] %0t accept AW %h", $time, s_awaddr);
+`endif
                             cmd_addr      <= s_awaddr;
                             cmd_id        <= s_awid;
                             s_awready_r   <= 1'b0;
@@ -167,32 +200,60 @@ module ddr_ctrl_top (
                             s_rlast_r  <= 1'b1;
                             s_rid_r    <= cmd_id;
                             if (s_rready) ctrl_state <= CS_IDLE;
-                        end else if (sched_ready && !sched_cmd_valid) begin
-                            // Re-issue read if scheduler returned to idle (e.g. after refresh)
-                            sched_cmd_type  <= 2'd0; // READ
-                            sched_cmd_valid <= 1'b1;
+                        end else begin
+                            // No re-issue needed any more: the held cmd_pend
+                            // contract guarantees the scheduler eventually
+                            // accepts the read, even behind a refresh or an
+                            // in-flight write. Watchdog bounds the wait.
+                            if (wd_cnt == 16'h0) begin
+                                // No data ever came: answer SLVERR instead of hanging
+                                s_rdata_r  <= 64'h0;
+                                s_rresp_r  <= 2'b10;   // SLVERR
+                                s_rvalid_r <= 1'b1;
+                                s_rlast_r  <= 1'b1;
+                                s_rid_r    <= cmd_id;
+                                if (s_rready) ctrl_state <= CS_IDLE;
+                            end else
+                                wd_cnt <= wd_cnt - 16'h1;
                         end
                     end
 
                     CS_WRITE: begin
                         if (s_wvalid) begin
+`ifdef TB_CTRL_TRACE
+                            $display("[CTRL] %0t accept W %h d=%h", $time,
+                                     cmd_addr, s_wdata);
+`endif
                             sched_wrdata    <= s_wdata;
                             sched_bg        <= cmd_addr[16:15];
                             sched_bank      <= cmd_addr[14:12];
                             sched_row       <= cmd_addr[32:17];
                             sched_col       <= cmd_addr[11:2];
                             sched_cmd_type  <= 2'd1; // WRITE
-                            sched_cmd_valid <= 1'b1;
+                            cmd_pend        <= 1'b1;
                             s_wready_r      <= 1'b0;
+                            wd_cnt          <= WD_LIMIT;
                             ctrl_state      <= CS_WRESP;
                         end
                     end
 
                     CS_WRESP: begin
-                        if (sched_ready) begin
+                        // B waits for the scheduler's real completion pulse —
+                        // NOT sched_ready, which is already high on the fire
+                        // cycle itself and would OKAY a write that hadn't
+                        // even been accepted yet (BUG-DDR-004).
+                        if (sched_cmd_done) begin
                             s_bvalid_r <= 1'b1;
                             s_bid_r    <= cmd_id;
                             if (s_bready) ctrl_state <= CS_IDLE;
+                        end else begin
+                            if (wd_cnt == 16'h0) begin
+                                s_bvalid_r <= 1'b1;
+                                s_bresp_r  <= 2'b10;   // SLVERR
+                                s_bid_r    <= cmd_id;
+                                if (s_bready) ctrl_state <= CS_IDLE;
+                            end else
+                                wd_cnt <= wd_cnt - 16'h1;
                         end
                     end
                 endcase
@@ -214,13 +275,15 @@ module ddr_ctrl_top (
     ddr_scheduler u_sched (
         .clk(clk), .rst_n(rst_n),
         .cmd_valid(sched_cmd_valid), .cmd_type(sched_cmd_type),
+        .cmd_bg(sched_bg),
         .cmd_bank(sched_bank), .cmd_row(sched_row), .cmd_col(sched_col),
         .cmd_ready(sched_ready),
+        .cmd_done(sched_cmd_done),
         .rd_data(sched_rddata), .rd_valid(sched_rdvalid),
         .wr_data(sched_wrdata),
         .dfi_cs_n(dfi_cs_n_w), .dfi_ras_n(dfi_ras_n_w),
         .dfi_cas_n(dfi_cas_n_w), .dfi_we_n(dfi_we_n_w),
-        .dfi_bank(dfi_bank_w), .dfi_addr(dfi_addr_w),
+        .dfi_bank(dfi_bank_w), .dfi_bg(dfi_bg_w), .dfi_addr(dfi_addr_w),
         .dfi_wrdata_valid(dfi_wrdata_valid_w), .dfi_wrdata(dfi_wrdata_w),
         .dfi_rddata(dfi_rddata_w), .dfi_rddata_valid(dfi_rddata_valid_w)
     );
@@ -230,16 +293,14 @@ module ddr_ctrl_top (
         .dfi_ck_en(init_done),
         .dfi_cs_n(dfi_cs_n_w), .dfi_ras_n(dfi_ras_n_w),
         .dfi_cas_n(dfi_cas_n_w), .dfi_we_n(dfi_we_n_w),
-        .dfi_bank(dfi_bank_w), .dfi_addr(dfi_addr_w),
+        .dfi_bank(dfi_bank_w), .dfi_bg(dfi_bg_w), .dfi_addr(dfi_addr_w),
         .dfi_wrdata_valid(dfi_wrdata_valid_w), .dfi_wrdata(dfi_wrdata_w),
         .dfi_wrdata_mask(8'h00),
         .dfi_rddata(dfi_rddata_w), .dfi_rddata_valid(dfi_rddata_valid_w),
         .ddr_ck_p(ddr_ck_p), .ddr_ck_n(ddr_ck_n), .ddr_cke(ddr_cke),
         .ddr_cs_n(ddr_cs_n), .ddr_ras_n(ddr_ras_n), .ddr_cas_n(ddr_cas_n),
-        .ddr_we_n(ddr_we_n), .ddr_ba(ddr_ba),
+        .ddr_we_n(ddr_we_n), .ddr_ba(ddr_ba), .ddr_bg(ddr_bg),
         .ddr_addr(ddr_addr), .ddr_dm(ddr_dm), .ddr_dq(ddr_dq),
         .ddr_dqs_p(ddr_dqs_p), .ddr_dqs_n(ddr_dqs_n)
     );
-
-    assign ddr_bg = 2'b00;
 endmodule

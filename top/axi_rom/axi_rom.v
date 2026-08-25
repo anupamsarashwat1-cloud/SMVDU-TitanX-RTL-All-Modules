@@ -27,13 +27,14 @@ module axi_rom #(
     // Real firmware would be loaded via HEX_FILE parameter
     reg [DW-1:0] rom [0:DEPTH-1];
     integer i;
+    reg [8*256-1:0] hexfile_arg;
     initial begin
         for (i = 0; i < DEPTH; i = i + 1)
             rom[i] = 64'h0000_0013_0000_0013; // NOP NOP (ADDI x0,x0,0 packed 2x)
-        // Entry: Simple UART write sequence at offset 0
-        rom[0] = 64'h0000_0013_0000_0013; // NOP NOP
-        rom[1] = 64'h0000_0013_0000_0013; // NOP NOP
-        if (HEX_FILE != "") $readmemh(HEX_FILE, rom);
+        if ($value$plusargs("hex=%s", hexfile_arg))
+            $readmemh(hexfile_arg, rom);            // runtime: +hex=path/to/firmware.hex
+        else if (HEX_FILE != "")
+            $readmemh(HEX_FILE, rom);
     end
 
     assign s_rresp = 2'b00; // OKAY

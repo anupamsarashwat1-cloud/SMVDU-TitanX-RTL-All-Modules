@@ -1,235 +1,195 @@
 // SPDX-License-Identifier: Apache-2.0
-// SMVDU TITAN-X — Integration Test: Memory Hierarchy
-// Tests: AXI Master → AXI4 Crossbar → DDR Controller → DDR PHY
-// Verifies: End-to-end write-then-read through the memory subsystem
-
+// SMVDU TITAN-X — Integration Test: Memory Hierarchy (self-checking rewrite)
+// Chain: AXI BFM → axi4_crossbar → ddr_ctrl_top → ddr_scheduler → ddr_phy_if
+//        → ddr4_sdram_bfm (in-sim DRAM model)
+// Every test compares data against expected values. No activity-based passes.
 `timescale 1ns/1ps
+
+`include "tb_bfms.vh"
 
 module tb_integ_memory_hierarchy;
 
-    // Parameters matching titan_x_top
-    localparam NM  = 2;
-    localparam NS  = 1;
-    localparam AW  = 40;
-    localparam DW  = 64;
-    localparam IDW = 4;
+    `include "tb_macros.vh"
 
-    reg clk, rst_n;
-    integer error_count = 0;
-    integer i;
+    reg clk;
+    reg rst_n;
+    `TB_HARNESS(6_000_000)   // generous wall: DDR init alone is 400 us at 10 ns clk
 
-    // AXI Master-side signals (driven by TB)
-    reg  [NM-1:0]       m_awvalid;
-    wire [NM-1:0]       m_awready;
-    reg  [(NM*AW)-1:0]  m_awaddr;
-    reg  [(NM*IDW)-1:0] m_awid;
-    reg  [NM-1:0]       m_wvalid;
-    wire [NM-1:0]       m_wready;
-    reg  [(NM*DW)-1:0]  m_wdata;
-    reg  [(NM*8)-1:0]   m_wstrb;
-    reg  [NM-1:0]       m_wlast;
-    wire [NM-1:0]       m_bvalid;
-    reg  [NM-1:0]       m_bready;
-    wire [(NM*2)-1:0]   m_bresp;
-    wire [(NM*IDW)-1:0] m_bid;
-    reg  [NM-1:0]       m_arvalid;
-    wire [NM-1:0]       m_arready;
-    reg  [(NM*AW)-1:0]  m_araddr;
-    reg  [(NM*IDW)-1:0] m_arid;
-    wire [NM-1:0]       m_rvalid;
-    reg  [NM-1:0]       m_rready;
-    wire [(NM*DW)-1:0]  m_rdata;
-    wire [(NM*2)-1:0]   m_rresp;
-    wire [NM-1:0]       m_rlast;
-    wire [(NM*IDW)-1:0] m_rid;
+    `TB_SCOREBOARD
 
-    // AXI Slave-side signals (crossbar → DDR controller)
-    wire [NS-1:0]       s_awvalid, s_awready;
-    wire [(NS*AW)-1:0]  s_awaddr;
-    wire [(NS*IDW)-1:0] s_awid;
-    wire [NS-1:0]       s_wvalid, s_wready;
-    wire [(NS*DW)-1:0]  s_wdata;
-    wire [(NS*8)-1:0]   s_wstrb;
-    wire [NS-1:0]       s_wlast;
-    wire [NS-1:0]       s_bvalid;
-    wire [NS-1:0]       s_bready;
-    wire [(NS*2)-1:0]   s_bresp;
-    wire [(NS*IDW)-1:0] s_bid;
-    wire [NS-1:0]       s_arvalid, s_arready;
-    wire [(NS*AW)-1:0]  s_araddr;
-    wire [(NS*IDW)-1:0] s_arid;
-    wire [NS-1:0]       s_rvalid;
-    wire [NS-1:0]       s_rready;
-    wire [(NS*DW)-1:0]  s_rdata;
-    wire [(NS*2)-1:0]   s_rresp;
-    wire [NS-1:0]       s_rlast;
-    wire [(NS*IDW)-1:0] s_rid;
+    // ---------------- parameters & wires ----------------
+    localparam AW = 40, DW = 64, IDW = 4, NS = 9;
 
-    // DDR PHY signals (directly monitored)
-    wire [15:0] ddr_addr;
-    wire [2:0]  ddr_ba;
-    wire [1:0]  ddr_bg;
-    wire        ddr_ck_p, ddr_ck_n, ddr_cke, ddr_cs_n;
-    wire        ddr_ras_n, ddr_cas_n, ddr_we_n;
-    wire [63:0] ddr_dq;
-    wire [7:0]  ddr_dqs_p, ddr_dqs_n;
+    wire         awvalid, awready, wvalid, wready, wlast;
+    wire         bvalid, bready, arvalid, arready, rvalid, rready, rlast;
+    wire [1:0]   bresp, rresp;
+    wire [AW-1:0] awaddr, araddr;
+    wire [DW-1:0] wdata, rdata;
+    wire [DW/8-1:0] wstrb;
 
-    // Clock: 100 MHz
-    always #5 clk = ~clk;
+    // crossbar slave side (flattened, NS=9)
+    wire [NS-1:0]        sx_awvalid, sx_wvalid, sx_wlast;
+    wire [NS-1:0]        sx_bvalid, sx_arvalid, sx_rvalid, sx_rready, sx_rlast;
+    wire [(NS*AW)-1:0]   sx_awaddr, sx_araddr;
+    wire [(NS*DW)-1:0]   sx_wdata, sx_rdata;
+    wire [(NS*(DW/8))-1:0] sx_wstrb;
+    wire [(NS*2)-1:0]    sx_bresp, sx_rresp;
+    wire [(NS*IDW)-1:0]  sx_awid, sx_bid, sx_arid, sx_rid;
+    // driven by slaves:
+    wire [NS-1:0]        sx_awready, sx_wready, sx_bready, sx_arready;
 
-    // DUT: AXI4 Crossbar
-    axi4_crossbar #(
-        .NM(NM), .NS(NS), .AW(AW), .DW(DW), .IDW(IDW)
-    ) u_crossbar (
+    // DDR pins
+    wire ck_p, ck_n, cke, cs_n, ras_n, cas_n, we_n;
+    wire [2:0] ba;  wire [1:0] bg;  wire [15:0] addr16;  wire [7:0] dm;
+    wire [63:0] dq;  wire [7:0] dqs_p, dqs_n;
+
+    // ---------------- BFMs & DUT chain ----------------
+    axi_master_bfm #(.AW(AW), .DW(DW), .IDW(IDW)) u_axi (
         .clk(clk), .rst_n(rst_n),
-        .m_awvalid(m_awvalid), .m_awready(m_awready), .m_awaddr(m_awaddr), .m_awid(m_awid),
-        .m_wvalid(m_wvalid), .m_wready(m_wready), .m_wdata(m_wdata), .m_wstrb(m_wstrb), .m_wlast(m_wlast),
-        .m_bvalid(m_bvalid), .m_bready(m_bready), .m_bresp(m_bresp), .m_bid(m_bid),
-        .m_arvalid(m_arvalid), .m_arready(m_arready), .m_araddr(m_araddr), .m_arid(m_arid),
-        .m_rvalid(m_rvalid), .m_rready(m_rready), .m_rdata(m_rdata), .m_rresp(m_rresp), .m_rlast(m_rlast), .m_rid(m_rid),
-        .s_awvalid(s_awvalid), .s_awready(s_awready), .s_awaddr(s_awaddr), .s_awid(s_awid),
-        .s_wvalid(s_wvalid), .s_wready(s_wready), .s_wdata(s_wdata), .s_wstrb(s_wstrb), .s_wlast(s_wlast),
-        .s_bvalid(s_bvalid), .s_bready(s_bready), .s_bresp(s_bresp), .s_bid(s_bid),
-        .s_arvalid(s_arvalid), .s_arready(s_arready), .s_araddr(s_araddr), .s_arid(s_arid),
-        .s_rvalid(s_rvalid), .s_rready(s_rready), .s_rdata(s_rdata), .s_rresp(s_rresp), .s_rlast(s_rlast), .s_rid(s_rid)
+        .m_awvalid(awvalid), .m_awready(awready), .m_awaddr(awaddr), .m_awid(),
+        .m_wvalid(wvalid), .m_wready(wready), .m_wdata(wdata),
+        .m_wstrb(wstrb), .m_wlast(wlast),
+        .m_bvalid(bvalid), .m_bready(bready), .m_bresp(bresp), .m_bid(),
+        .m_arvalid(arvalid), .m_arready(arready), .m_araddr(araddr), .m_arid(),
+        .m_rvalid(rvalid), .m_rready(rready), .m_rdata(rdata),
+        .m_rresp(rresp), .m_rlast(rlast), .m_rid()
     );
 
-    // DUT: DDR Controller (connects as AXI slave)
+    axi4_crossbar #(.NM(1), .NS(NS)) u_xbar (
+        .clk(clk), .rst_n(rst_n),
+        .m_awvalid(awvalid), .m_awready(awready), .m_awaddr(awaddr),
+        .m_awid({IDW{1'b0}}),
+        .m_wvalid(wvalid), .m_wready(wready), .m_wdata(wdata),
+        .m_wstrb(wstrb), .m_wlast(wlast),
+        .m_bvalid(bvalid), .m_bready(bready), .m_bresp(bresp), .m_bid(),
+        .m_arvalid(arvalid), .m_arready(arready), .m_araddr(araddr),
+        .m_arid({IDW{1'b0}}),
+        .m_rvalid(rvalid), .m_rready(rready), .m_rdata(rdata),
+        .m_rresp(rresp), .m_rlast(rlast), .m_rid(),
+        .s_awvalid(sx_awvalid), .s_awready(sx_awready),
+        .s_awaddr(sx_awaddr), .s_awid(sx_awid),
+        .s_wvalid(sx_wvalid), .s_wready(sx_wready),
+        .s_wdata(sx_wdata), .s_wstrb(sx_wstrb), .s_wlast(sx_wlast),
+        .s_bvalid(sx_bvalid), .s_bready(sx_bready),
+        .s_bresp(sx_bresp), .s_bid(sx_bid),
+        .s_arvalid(sx_arvalid), .s_arready(sx_arready),
+        .s_araddr(sx_araddr), .s_arid(sx_arid),
+        .s_rvalid(sx_rvalid), .s_rready(sx_rready),
+        .s_rdata(sx_rdata), .s_rresp(sx_rresp),
+        .s_rlast(sx_rlast), .s_rid(sx_rid)
+    );
+
+    // slave 0 = DDR region ([39:31]==9'h001); slaves 1..8 tied off
+    genvar s;
+    generate for (s = 1; s < NS; s = s + 1) begin : g_tie
+        assign sx_awready[s] = 1'b1;
+        assign sx_wready[s]  = 1'b1;
+        assign sx_bready[s]  = 1'b1;
+        assign sx_bvalid[s]  = 1'b0;
+        assign sx_bid[s*IDW +: IDW] = {IDW{1'b0}};
+        assign sx_bresp[s*2 +: 2]   = 2'b00;
+        assign sx_arready[s] = 1'b1;
+        assign sx_rvalid[s]  = 1'b0;
+        assign sx_rdata[s*DW +: DW] = {DW{1'b0}};
+        assign sx_rresp[s*2 +: 2]   = 2'b00;
+        assign sx_rlast[s]   = 1'b0;
+        assign sx_rid[s*IDW +: IDW] = {IDW{1'b0}};
+    end endgenerate
+
     ddr_ctrl_top u_ddr (
         .clk(clk), .rst_n(rst_n),
-        .s_awvalid(s_awvalid[0]), .s_awready(s_awready[0]),
-        .s_awaddr(s_awaddr[AW-1:0]), .s_awid(s_awid[IDW-1:0]),
-        .s_awlen(8'h0), .s_awsize(3'h3),
-        .s_wvalid(s_wvalid[0]), .s_wready(s_wready[0]),
-        .s_wdata(s_wdata[DW-1:0]), .s_wstrb(s_wstrb[7:0]), .s_wlast(s_wlast[0]),
-        .s_bvalid(s_bvalid[0]), .s_bready(s_bready[0]),
-        .s_bresp(s_bresp[1:0]), .s_bid(s_bid[IDW-1:0]),
-        .s_arvalid(s_arvalid[0]), .s_arready(s_arready[0]),
-        .s_araddr(s_araddr[AW-1:0]), .s_arid(s_arid[IDW-1:0]),
-        .s_arlen(8'h0),
-        .s_rvalid(s_rvalid[0]), .s_rready(s_rready[0]),
-        .s_rdata(s_rdata[DW-1:0]), .s_rresp(s_rresp[1:0]),
-        .s_rlast(s_rlast[0]), .s_rid(s_rid[IDW-1:0]),
-        .ddr_addr(ddr_addr), .ddr_ba(ddr_ba), .ddr_bg(ddr_bg),
-        .ddr_ck_p(ddr_ck_p), .ddr_ck_n(ddr_ck_n), .ddr_cke(ddr_cke),
-        .ddr_cs_n(ddr_cs_n), .ddr_ras_n(ddr_ras_n), .ddr_cas_n(ddr_cas_n),
-        .ddr_we_n(ddr_we_n), .ddr_dq(ddr_dq), .ddr_dqs_p(ddr_dqs_p), .ddr_dqs_n(ddr_dqs_n)
+        .s_awvalid(sx_awvalid[0]), .s_awready(sx_awready[0]),
+        .s_awaddr(sx_awaddr[0*AW +: AW]), .s_awid(sx_awid[0*IDW +: IDW]),
+        .s_awlen(8'h00), .s_awsize(3'd3),
+        .s_wvalid(sx_wvalid[0]), .s_wready(sx_wready[0]),
+        .s_wdata(sx_wdata[0*DW +: DW]),
+        .s_wstrb(sx_wstrb[0*(DW/8) +: (DW/8)]), .s_wlast(sx_wlast[0]),
+        .s_bvalid(sx_bvalid[0]), .s_bready(sx_bready[0]),
+        .s_bresp(sx_bresp[0*2 +: 2]), .s_bid(sx_bid[0*IDW +: IDW]),
+        .s_arvalid(sx_arvalid[0]), .s_arready(sx_arready[0]),
+        .s_araddr(sx_araddr[0*AW +: AW]), .s_arid(sx_arid[0*IDW +: IDW]),
+        .s_arlen(8'h00),
+        .s_rvalid(sx_rvalid[0]), .s_rready(sx_rready[0]),
+        .s_rdata(sx_rdata[0*DW +: DW]),
+        .s_rresp(sx_rresp[0*2 +: 2]), .s_rlast(sx_rlast[0]),
+        .s_rid(sx_rid[0*IDW +: IDW]),
+        .ddr_ck_p(ck_p), .ddr_ck_n(ck_n), .ddr_cke(cke), .ddr_cs_n(cs_n),
+        .ddr_ras_n(ras_n), .ddr_cas_n(cas_n), .ddr_we_n(we_n),
+        .ddr_ba(ba), .ddr_bg(bg), .ddr_addr(addr16), .ddr_dm(dm),
+        .ddr_dq(dq), .ddr_dqs_p(dqs_p), .ddr_dqs_n(dqs_n)
     );
 
-    // AXI Write Task via Master 0
-    task axi_write(input [39:0] addr, input [63:0] data);
-        begin
-            @(posedge clk);
-            m_awvalid[0] = 1'b1;
-            m_awaddr[AW-1:0] = addr;
-            m_awid[IDW-1:0] = 4'h1;
-            @(posedge clk);
-            while (!m_awready[0]) @(posedge clk);
-            m_awvalid[0] = 1'b0;
+    ddr4_sdram_bfm #(.ROWS(1024), .COLS(64)) u_dram (
+        .ddr_ck_p(ck_p), .ddr_ck_n(ck_n), .ddr_cke(cke),
+        .ddr_cs_n(cs_n), .ddr_ras_n(ras_n), .ddr_cas_n(cas_n),
+        .ddr_we_n(we_n),
+        .ddr_act_n(1'b0), .ddr_reset_n(1'b1), .ddr_odt(1'b0),
+        .ddr_addr(addr16), .ddr_ba(ba), .ddr_bg(bg),
+        .ddr_dq(dq), .ddr_dqs_p(dqs_p), .ddr_dqs_n(dqs_n)
+    );
 
-            m_wvalid[0] = 1'b1;
-            m_wdata[DW-1:0] = data;
-            m_wstrb[7:0] = 8'hFF;
-            m_wlast[0] = 1'b1;
-            @(posedge clk);
-            while (!m_wready[0]) @(posedge clk);
-            m_wvalid[0] = 1'b0;
-            m_wlast[0] = 1'b0;
-
-            // Wait for B response
-            while (!m_bvalid[0]) @(posedge clk);
-            if (m_bresp[1:0] != 2'b00) begin
-                $display("ERROR: AXI Write to 0x%010h got BRESP=%b", addr, m_bresp[1:0]);
-                error_count = error_count + 1;
-            end
-            @(posedge clk);
-        end
-    endtask
-
-    // AXI Read Task via Master 0
-    task axi_read(input [39:0] addr, output [63:0] data);
-        begin
-            @(posedge clk);
-            m_arvalid[0] = 1'b1;
-            m_araddr[AW-1:0] = addr;
-            m_arid[IDW-1:0] = 4'h1;
-            @(posedge clk);
-            while (!m_arready[0]) @(posedge clk);
-            // Hold arvalid for grant tracking
-            while (!m_rvalid[0]) @(posedge clk);
-            data = m_rdata[DW-1:0];
-            m_arvalid[0] = 1'b0;
-            if (m_rresp[1:0] != 2'b00) begin
-                $display("ERROR: AXI Read from 0x%010h got RRESP=%b", addr, m_rresp[1:0]);
-                error_count = error_count + 1;
-            end
-            @(posedge clk);
-        end
-    endtask
-
-    // Test
-    reg [63:0] rdata;
     initial begin
         $dumpfile("tb_integ_memory_hierarchy.vcd");
         $dumpvars(0, tb_integ_memory_hierarchy);
-
-        clk = 0; rst_n = 0;
-        m_awvalid = 0; m_awaddr = 0; m_awid = 0;
-        m_wvalid = 0; m_wdata = 0; m_wstrb = 0; m_wlast = 0;
-        m_bready = {NM{1'b1}};
-        m_arvalid = 0; m_araddr = 0; m_arid = 0;
-        m_rready = {NM{1'b1}};
-
-        #100;
-        rst_n = 1;
-        #50;
-
-        $display("=== INTEGRATION TEST: Memory Hierarchy ===");
-        $display("Test: AXI Master → Crossbar → DDR Controller → DDR PHY");
-        $display("");
-
-        // Test 1: Single AXI write
-        $display("[TEST 1] AXI Write 0xDEAD_BEEF_CAFE_BABE to addr 0x0000_0000_0100");
-        axi_write(40'h0000_0000_0100, 64'hDEAD_BEEF_CAFE_BABE);
-        $display("[TEST 1] Write completed — DDR signals toggled");
-
-        // Test 2: AXI read (data may not match since DDR PHY is open-drain in sim)
-        $display("[TEST 2] AXI Read from addr 0x0000_0000_0100");
-        axi_read(40'h0000_0000_0100, rdata);
-        $display("[TEST 2] Read data = 0x%016h", rdata);
-
-        // Test 3: Multiple writes from Master 0
-        $display("[TEST 3] Burst of 4 writes");
-        for (i = 0; i < 4; i = i + 1) begin
-            axi_write(40'h0000_0000_1000 + i * 8, {32'hAAAA_0000 + i, 32'h5555_0000 + i});
-        end
-        $display("[TEST 3] 4 writes completed");
-
-        // Test 4: Verify DDR PHY toggling
-        $display("[TEST 4] DDR PHY Activity Check");
-        if (ddr_cke === 1'bx) begin
-            $display("WARNING: DDR CKE is X (no DDR BFM — expected in standalone sim)");
-        end else begin
-            $display("[TEST 4] DDR CKE=%b CS_N=%b", ddr_cke, ddr_cs_n);
-        end
-
-        #200;
-
-        $display("");
-        $display("==============================");
-        if (error_count == 0)
-            $display("INTEG_MEMORY_HIERARCHY VERDICT: ✅ PASS — Crossbar→DDR path functional");
-        else
-            $display("INTEG_MEMORY_HIERARCHY VERDICT: ❌ FAIL — %0d errors", error_count);
-        $display("==============================");
-        $finish;
     end
 
-    // Timeout
+    // ---------------- test sequence ----------------
+    reg [1:0]  resp;
+    reg [63:0] rd;
+    integer t;
+
+    task wr_check(input [39:0] a, input [63:0] d);
+        begin
+            u_axi.axi_write(a, d, resp);
+            tb_checks = tb_checks + 1;
+            if (resp !== 2'b00) begin
+                tb_errors = tb_errors + 1;
+                $display("[FAIL] write @%h resp=%b (%0t)", a, resp, $time);
+            end
+        end
+    endtask
+
+    task rd_expect(input [39:0] a, input [63:0] exp);
+        begin
+            u_axi.axi_read(a, rd, resp);
+            `EXPECT_EQ(resp, 2'b00, "read resp OKAY")
+            `EXPECT_KNOWN(rd, 64, "readback bits known")
+            `EXPECT_EQ(rd, exp, "readback value")
+        end
+    endtask
+
     initial begin
-        #100000;
-        $display("INTEG_MEMORY_HIERARCHY VERDICT: ❌ FAIL — Timeout");
-        $finish;
+        // wait out DDR controller init (INIT_CYCLES=40000)
+        t = 0;
+        while (u_ddr.init_done !== 1'b1 && t < 100000) begin
+            @(posedge clk); t = t + 1;
+        end
+        `EXPECT_TRUE(u_ddr.init_done === 1'b1, "DDR init completes")
+        repeat (20) @(posedge clk);
+
+        // T1: single write + readback
+        wr_check(40'h00_8000_0100, 64'hDEAD_BEEF_CAFE_BABE);
+        rd_expect (40'h00_8000_0100, 64'hDEAD_BEEF_CAFE_BABE);
+
+        // T2: second location keeps first intact
+        wr_check(40'h00_8000_0200, 64'h1234_5678_9ABC_DEF0);
+        rd_expect (40'h00_8000_0100, 64'hDEAD_BEEF_CAFE_BABE);
+        rd_expect (40'h00_8000_0200, 64'h1234_5678_9ABC_DEF0);
+
+        // T3: bank-group aliasing regression — addresses differing only in
+        // bits [16:15] must NOT collide (bg tied 0 in current RTL)
+        wr_check(40'h00_8000_0100, 64'hAAAA_AAAA_AAAA_AAAA);
+        wr_check(40'h00_8000_8100, 64'hBBBB_BBBB_BBBB_BBBB);
+        rd_expect (40'h00_8000_0100, 64'hAAAA_AAAA_AAAA_AAAA);
+        rd_expect (40'h00_8000_8100, 64'hBBBB_BBBB_BBBB_BBBB);
+
+        // T4: bit patterns — all-ones and LSB-of-upper-word
+        wr_check(40'h00_8000_0300, 64'hFFFF_FFFF_FFFF_FFFF);
+        wr_check(40'h00_8000_0308, 64'h0000_0000_0000_0001);
+        rd_expect (40'h00_8000_0300, 64'hFFFF_FFFF_FFFF_FFFF);
+        rd_expect (40'h00_8000_0308, 64'h0000_0000_0000_0001);
+
+        `TB_REPORT("MEM_HIER")
     end
 
 endmodule

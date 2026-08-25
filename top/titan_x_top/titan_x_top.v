@@ -154,9 +154,9 @@ module titan_x_top (
         end
     endgenerate
 
-    // Boot ROM on Slave 2
+    // Boot ROM on Slave 2 — override at runtime with +hex=path/to/firmware.hex
     axi_rom #(
-        .HEX_FILE("/home/anupam-sarashwat/titan_x_firmware/firmware.hex")
+        .HEX_FILE("firmware.hex")
     ) u_boot_rom (
         .clk(clk),
         .rst_n(rst_n),

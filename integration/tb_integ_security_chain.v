@@ -1,155 +1,146 @@
 // SPDX-License-Identifier: Apache-2.0
-// SMVDU TITAN-X — Integration Test: Security Chain
-// Tests: secure_boot → envm_ctrl → DRBG → TRNG seed path
-// Verifies: Boot sequence and crypto seeding pipeline
-
+// SMVDU TITAN-X — Integration Test: Security Chain (self-checking rewrite)
+// DRBG: APB BFM drives instantiate/generate/reseed; entropy forced by TB
+//       (TB plays the TRNG role until the real TRNG is integrated).
+// secure_boot: FSM observed through boot_pass/boot_fail and its APB status.
+// Every test checks exact register values or state transitions.
 `timescale 1ns/1ps
+
+`include "tb_bfms.vh"
 
 module tb_integ_security_chain;
 
-    reg clk, rst_n;
-    integer error_count = 0;
+    `include "tb_macros.vh"
 
-    // APB bus
-    reg  [31:0] paddr, pwdata;
-    reg         psel_boot, psel_envm, psel_drbg;
-    reg         penable, pwrite;
-    wire [31:0] prdata_boot, prdata_envm, prdata_drbg;
+    reg clk;
+    reg rst_n;
+    `TB_HARNESS(2_000_000)
 
-    // Boot signals
-    wire boot_pass, boot_fail;
+    `TB_SCOREBOARD
 
-    // eNVM interface
-    wire [31:0] envm_addr;
-    wire        envm_req;
-    wire [31:0] envm_rdata;
-    wire        envm_valid;
+    // ---------------- shared APB bus ----------------
+    wire [31:0] paddr, pwdata;
+    wire        psel, penable, pwrite;
+    wire [31:0] prdata_drbg, prdata_boot;
+    wire        drbg_irq;
+    wire        psel_drbg = psel && (paddr[11:8] == 4'h1);
+    wire        psel_boot = psel && (paddr[11:8] == 4'h2);
+    wire [31:0] prdata_mux = psel_drbg ? prdata_drbg :
+                            psel_boot ? prdata_boot : 32'h0;
 
-    // TRNG→DRBG seed
+    // ---------------- DRBG ----------------
+    reg [255:0] entropy =
+        256'h0123_4567_89AB_CDEF_FEDC_BA98_7654_3210_A5A5_5A5A_DEAD_BEEF_CAFE_BABE;
     reg         trng_valid;
-    reg  [127:0] trng_entropy;
 
-    // Clock
-    always #5 clk = ~clk;
-
-    // DUT: Secure Boot
-    secure_boot u_secure_boot (
+    apb_master_bfm u_apb (
         .clk(clk), .rst_n(rst_n),
-        .paddr(paddr), .psel(psel_boot), .penable(penable), .pwrite(pwrite),
-        .pwdata(pwdata), .prdata(prdata_boot), .pready(), .pslverr(),
-        .envm_addr(envm_addr), .envm_req(envm_req),
-        .envm_rdata(envm_rdata), .envm_valid(envm_valid),
-        .boot_pass(boot_pass), .boot_fail(boot_fail)
+        .paddr(paddr), .psel(psel), .penable(penable), .pwrite(pwrite),
+        .pwdata(pwdata), .prdata(prdata_mux), .pready(1'b1), .pslverr(1'b0)
     );
 
-    // DUT: eNVM Controller
-    envm_ctrl u_envm (
-        .clk(clk), .rst_n(rst_n),
-        .s_arvalid(1'b0), .s_arready(), .s_araddr(32'h0),
-        .s_rvalid(), .s_rready(1'b0), .s_rdata(), .s_rresp(),
-        .paddr(paddr), .psel(psel_envm), .penable(penable), .pwrite(pwrite),
-        .pwdata(pwdata), .prdata(prdata_envm), .pready(), .pslverr(),
-        .envm_clk(), .envm_ce_n(), .envm_we_n(), .envm_addr(),
-        .envm_wdata(), .envm_rdata(32'hDEAD_BEEF), .envm_ready(1'b1)
-    );
-
-    // DUT: DRBG
-    wire drbg_irq;
     drbg u_drbg (
         .clk(clk), .rst_n(rst_n),
         .paddr(paddr), .psel(psel_drbg), .penable(penable), .pwrite(pwrite),
         .pwdata(pwdata), .prdata(prdata_drbg), .pready(), .pslverr(),
-        .trng_entropy(trng_entropy), .trng_valid(trng_valid), .trng_ready(),
+        .trng_entropy(entropy), .trng_valid(trng_valid), .trng_ready(),
         .drbg_irq(drbg_irq)
     );
 
-    // APB Write Task
-    task apb_write(input [31:0] addr, input [31:0] data, input sel_boot, sel_envm, sel_drbg);
-        begin
-            paddr = addr; psel_boot = sel_boot; psel_envm = sel_envm; psel_drbg = sel_drbg;
-            penable = 0; pwrite = 1; pwdata = data;
-            @(posedge clk); #1;
-            penable = 1;
-            @(posedge clk);
-            psel_boot = 0; psel_envm = 0; psel_drbg = 0; penable = 0;
-            @(posedge clk);
-        end
-    endtask
+    // ---------------- secure_boot ----------------
+    wire        boot_pass, boot_fail;
+    wire        envm_req;
+    reg         envm_valid;
 
-    // APB Read Task
-    task apb_read(input [31:0] addr, input sel_boot, sel_envm, sel_drbg, output [31:0] data);
-        begin
-            paddr = addr; psel_boot = sel_boot; psel_envm = sel_envm; psel_drbg = sel_drbg;
-            penable = 0; pwrite = 0;
-            @(posedge clk); #1;
-            penable = 1;
-            @(posedge clk);
-            if (sel_boot) data = prdata_boot;
-            else if (sel_envm) data = prdata_envm;
-            else data = prdata_drbg;
-            psel_boot = 0; psel_envm = 0; psel_drbg = 0; penable = 0;
-            @(posedge clk);
-        end
-    endtask
+    secure_boot u_boot (
+        .clk(clk), .rst_n(rst_n),
+        .paddr(paddr), .psel(psel_boot), .penable(penable), .pwrite(pwrite),
+        .pwdata(pwdata), .prdata(prdata_boot), .pready(), .pslverr(),
+        .envm_addr(), .envm_req(envm_req), .envm_rdata(32'h0),
+        .envm_valid(envm_valid),
+        .boot_pass(boot_pass), .boot_fail(boot_fail)
+    );
 
-    reg [31:0] rd;
+    // feed eNVM read-valids while the boot engine reads
+    always @(posedge clk) envm_valid <= envm_req;
+
     initial begin
         $dumpfile("tb_integ_security_chain.vcd");
         $dumpvars(0, tb_integ_security_chain);
-
-        clk = 0; rst_n = 0;
-        paddr = 0; pwdata = 0;
-        psel_boot = 0; psel_envm = 0; psel_drbg = 0;
-        penable = 0; pwrite = 0;
-        trng_valid = 0; trng_entropy = 128'h0;
-
-        #100;
-        rst_n = 1;
-        #50;
-
-        $display("=== INTEGRATION TEST: Security Chain ===");
-        $display("Test: secure_boot ↔ envm_ctrl, TRNG → DRBG seed");
-        $display("");
-
-        // Test 1: Check boot status
-        $display("[TEST 1] Read secure_boot status register");
-        apb_read(32'h0000_0000, 1, 0, 0, rd);
-        $display("[TEST 1] Boot status = 0x%08h, boot_pass=%b boot_fail=%b", rd, boot_pass, boot_fail);
-
-        // Test 2: Read eNVM register
-        $display("[TEST 2] Read eNVM controller status");
-        apb_read(32'h0000_0000, 0, 1, 0, rd);
-        $display("[TEST 2] eNVM status = 0x%08h", rd);
-
-        // Test 3: Feed TRNG seed to DRBG
-        $display("[TEST 3] Provide TRNG entropy to DRBG");
-        trng_entropy = 128'hDEADBEEF_CAFEBABE_12345678_9ABCDEF0;
-        trng_valid = 1;
-        @(posedge clk); @(posedge clk);
-        trng_valid = 0;
-
-        // Test 4: Write DRBG instantiate command
-        $display("[TEST 4] DRBG: Write INSTANTIATE command");
-        apb_write(32'h0000_0004, 32'h0000_0001, 0, 0, 1);  // Command reg
-
-        // Test 5: Read DRBG status
-        #100;
-        $display("[TEST 5] Read DRBG status");
-        apb_read(32'h0000_0000, 0, 0, 1, rd);
-        $display("[TEST 5] DRBG status = 0x%08h, drbg_irq=%b", rd, drbg_irq);
-
-        #500;
-
-        $display("");
-        $display("==============================");
-        if (error_count == 0)
-            $display("INTEG_SECURITY_CHAIN VERDICT: ✅ PASS — Boot↔eNVM and TRNG→DRBG paths functional");
-        else
-            $display("INTEG_SECURITY_CHAIN VERDICT: ❌ FAIL — %0d errors", error_count);
-        $display("==============================");
-        $finish;
     end
 
-    initial begin #200000; $display("INTEG_SECURITY_CHAIN VERDICT: ❌ FAIL — Timeout"); $finish; end
+    // ---------------- tests ----------------
+    reg [31:0] rd;
+    reg [1:0]  apb_resp;
+    integer guard;
+
+    task apb_w(input [31:0] a, input [31:0] d);
+        begin u_apb.apb_write(a, d, apb_resp); end
+    endtask
+
+    task apb_r(input [31:0] a);
+        begin u_apb.apb_read(a, rd, apb_resp); end
+    endtask
+
+    initial begin
+        repeat (30) @(posedge clk);
+
+        // S1: clean initial state
+        apb_r(32'h1000_0004);
+        `EXPECT_EQ(rd[1:0], 2'b00, "DRBG idle busy=0 done=0")
+
+        // S2: instantiate with known entropy -> done + irq
+        apb_w(32'h1000_0000, 32'h0000_0001);   // CTRL.instantiate
+        trng_valid = 1'b1;
+        guard = 0;
+        while (u_drbg.stat_reg[1] !== 1'b1 && guard < 50) begin @(posedge clk); guard = guard+1; end
+        trng_valid = 1'b0;
+        `EXPECT_TRUE(u_drbg.stat_reg[1] === 1'b1, "instantiate sets DONE")
+        `EXPECT_TRUE(drbg_irq === 1'b1, "drbg_irq reflects DONE")
+        `EXPECT_EQ(u_drbg.reseed_counter, 32'd1, "reseed counter=1")
+        `EXPECT_EQ(u_drbg.Key, ~entropy, "Key=~entropy")
+
+        // S3: first GENERATE returns original V words (V increments after capture)
+        apb_r(32'h1000_0004);                  // clears done
+        apb_w(32'h1000_0000, 32'h0000_0004);   // CTRL.generate
+        guard = 0;
+        while (u_drbg.stat_reg[1] !== 1'b1 && guard < 50) begin @(posedge clk); guard = guard+1; end
+        `EXPECT_TRUE(u_drbg.stat_reg[1] === 1'b1, "generate sets DONE")
+        apb_r(32'h1000_0010);
+        `EXPECT_EQ(rd, entropy[31:0], "gen out[0]==V[31:0]")
+        apb_r(32'h1000_002c);
+        `EXPECT_EQ(rd, entropy[255:224], "gen out[7]==V[255:224]")
+        `EXPECT_EQ(u_drbg.V, entropy + 256'h1, "V incremented")
+
+        // S4: second generate returns incremented words — determinism check
+        apb_r(32'h1000_0004);
+        apb_w(32'h1000_0000, 32'h0000_0004);
+        guard = 0;
+        while (u_drbg.stat_reg[1] !== 1'b1 && guard < 50) begin @(posedge clk); guard = guard+1; end
+        apb_r(32'h1000_0010);
+        `EXPECT_EQ(rd, entropy[31:0] + 32'h1, "second gen out[0]==V+1")
+
+        // S5: reseed path re-sets done and resets counter
+        apb_r(32'h1000_0004);
+        apb_w(32'h1000_0000, 32'h0000_0002);   // CTRL.reseed
+        trng_valid = 1'b1;
+        guard = 0;
+        while (u_drbg.stat_reg[1] !== 1'b1 && guard < 50) begin @(posedge clk); guard = guard+1; end
+        trng_valid = 1'b0;
+        `EXPECT_TRUE(u_drbg.stat_reg[1] === 1'b1, "reseed sets DONE")
+        `EXPECT_EQ(u_drbg.reseed_counter, 32'd1, "reseed resets counter")
+
+        // S6: secure boot reaches SUCCESS with fed eNVM valids (mock verifier)
+        guard = 0;
+        while (boot_pass !== 1'b1 && guard < 50000) begin @(posedge clk); guard = guard+1; end
+        `EXPECT_TRUE(boot_pass === 1'b1, "secure_boot asserts boot_pass")
+        `EXPECT_TRUE(boot_fail === 1'b0, "secure_boot never asserts boot_fail")
+        if (boot_pass === 1'b1) begin
+            apb_r(32'h2000_0000);
+            `EXPECT_EQ(rd[2:0], 3'd4, "boot APB status==SUCCESS")
+        end
+
+        `TB_REPORT("SEC_CHAIN")
+    end
 
 endmodule
