@@ -55,7 +55,11 @@ module rv_mem (
     assign mem_stall  = mem_active && (mstate != MS_DONE);
     assign fwd_mem_data  = result;
     assign fwd_mem_rd    = rd_out;
-    assign fwd_mem_valid = valid_out && reg_write_out;
+    // Suppress forwarding while a memory transaction is in flight: 'result'
+    // still holds the PREVIOUS instruction's value until the transfer
+    // completes, and advertising it here would feed a dependent in execute
+    // with stale data for the whole bus latency.
+    assign fwd_mem_valid = valid_out && reg_write_out && !mem_active;
 
     // Load data sign-extension
     function [63:0] extend_load;
@@ -119,14 +123,29 @@ module rv_mem (
                         dmem_awvalid <= 1'b1;
                         dmem_awaddr  <= alu_result[39:0];
                         dmem_wvalid  <= 1'b1;
-                        dmem_wdata   <= rs2_data;
-                        dmem_wstrb   <= wstrb_from_f3(funct3);
+                        // Data rides the SAME lane as its strobe: the slave
+                        // merges window byte j from bus lane j. Shifting the
+                        // strobe without the data wrote the wrong slice of
+                        // rs2 into the addressed lane.
+                        dmem_wdata   <= rs2_data
+                                        << {alu_result[2:0], 3'b000};
+                        // Strobes ride the byte lane selected by address
+                        // bits [2:0]. Lane-0-always made every non-offset-0
+                        // sub-word store land up to 7 bytes early (an sb@+14
+                        // rewrote byte 0 of the window instead).
+                        dmem_wstrb   <= wstrb_from_f3(funct3)
+                                        << alu_result[2:0];
                         dmem_bready  <= 1'b1;
                         mem_active   <= 1'b1;
                         mstate       <= MS_DATA;
                         rd_out        <= rd_in;
                         reg_write_out <= reg_write;
                         result        <= alu_result;
+                        // Nothing retires while the transaction flies:
+                        // holding the previous completer's valid here made
+                        // WB latch a ghost {rd, stale result} pair one
+                        // cycle before the real writeback.
+                        valid_out    <= 1'b0;
                     end else if (valid_in && mem_read) begin
                         dmem_arvalid <= 1'b1;
                         dmem_araddr  <= alu_result[39:0];
@@ -135,6 +154,7 @@ module rv_mem (
                         mstate       <= MS_DATA;
                         rd_out        <= rd_in;
                         reg_write_out <= reg_write;
+                        valid_out    <= 1'b0;   // same ghost-write guard
                     end else begin
                         result        <= alu_result;
                         rd_out        <= rd_in;
@@ -155,7 +175,12 @@ module rv_mem (
                     end
                     if (dmem_rvalid) begin
                         load_data    <= dmem_rdata;
-                        result       <= extend_load(dmem_rdata, funct3);
+                        // Mirror of the store-side lane shift: the slave
+                        // returns the whole doubleword, so the addressed
+                        // lane sits at bits [8*araddr[2:0] +: size].
+                        result       <= extend_load(
+                            dmem_rdata >> {dmem_araddr[2:0], 3'b000},
+                            funct3);
                         dmem_rready  <= 1'b0;
                         valid_out    <= 1'b1;
                         mem_active   <= 1'b0;

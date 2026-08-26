@@ -27,6 +27,7 @@ module tb_rv_fetch();
     reg [63:0] cap_pc;
     reg saw_arvalid;
     reg [63:0] cap_araddr;
+    reg saw_tgt_ar;
 
     always @(posedge clk) begin
         if (valid_out) begin
@@ -102,26 +103,63 @@ module tb_rv_fetch();
             error_count=error_count+1;
         end
 
-        // TEST 3: Branch redirect → new PC
+        // TEST 3: Branch redirect → new PC (AXI-correct drain semantics)
+        // A redirect while a fetch AR is outstanding cannot retract that
+        // request: AXI forbids changing ARADDR under held ARVALID. The DUT
+        // therefore lets the stale AR complete its handshake, swallows the
+        // orphaned read beat, and only THEN issues the redirected fetch.
+        // This test verifies the full drain→retarget→deliver sequence.
+        // Scenario is deterministic: entering here the AR for PC_RESET+4
+        // is held unaccepted (arready was 0), so exactly one orphan R beat
+        // will be owed after the redirect.
         $display("\n--- TEST 3: Branch redirect to 0x8000_1000 ---");
-        saw_arvalid=0; cap_araddr=0;
+        saw_tgt_ar = 0;
         @(posedge clk); #1;
         branch_taken=1; branch_target=64'h8000_1000;
-        imem_arready=0;  // hold low to keep arvalid visible
         @(posedge clk); #1; branch_taken=0;
-        repeat(4) @(posedge clk); #1;
-        if (saw_arvalid) begin
-            check(cap_araddr, 64'h8000_1000, "imem_addr=0x80001000 after branch redirect");
-            $display("PASS [%0t] imem_arvalid seen after branch redirect", $time);
-        end else begin
-            $display("FAIL [%0t] imem_arvalid never after branch redirect", $time);
+        imem_arready=1;   // allow the stale AR handshake to complete
+        // Wait for the stale AR to be accepted (arvalid drops).
+        repeat(8) @(posedge clk); #1;
+        if (imem_arvalid) begin
+            $display("FAIL [%0t] stale AR still held after arready=1", $time);
             error_count=error_count+1;
         end
-        // Clean up: accept and ignore
-        @(posedge clk); #1; imem_arready=1;
-        @(posedge clk); #1; imem_arready=0;
-        imem_rvalid=1; imem_rdata=32'h0000_0013;  // NOP
+        // Supply the orphaned read beat for the abandoned stream.
+        imem_rvalid=1; imem_rdata=32'hDEAD_BEEF; imem_rresp=0;
         @(posedge clk); #1; imem_rvalid=0;
+        // Now watch for the REDIRECTED fetch request.
+        begin : wait_tgt
+            integer k;
+            for (k=0; k<16 && !saw_tgt_ar; k=k+1) begin
+                @(posedge clk); #1;
+                if (imem_arvalid && imem_addr == 64'h8000_1000)
+                    saw_tgt_ar = 1;
+            end
+        end
+        check({63'b0, saw_tgt_ar}, 64'h1,
+              "redirected AR to 0x80001000 observed after drain");
+        // Let the redirected AR handshake complete (arvalid drops) BEFORE
+        // supplying data — an R beat offered in the acceptance cycle itself
+        // arrives before pending_r is set and would be ignored.
+        begin : settle
+            integer m;
+            for (m=0; m<4; m=m+1) begin
+                @(posedge clk); #1;
+                if (!imem_arvalid) m = 99;
+            end
+        end
+        // Complete the redirected fetch and check the DELIVERY pair.
+        got_valid=0;
+        imem_rvalid=1; imem_rdata=32'h1234_5678; imem_rresp=0;
+        @(posedge clk); #1; imem_rvalid=0;
+        repeat(6) @(posedge clk); #1;
+        if (got_valid) begin
+            check(cap_pc,    64'h8000_1000, "delivered pc=0x80001000 after redirect");
+            check(cap_instr, 32'h1234_5678, "delivered instr matches redirected beat");
+        end else begin
+            $display("FAIL [%0t] no delivery after redirected fetch", $time);
+            error_count=error_count+1;
+        end
 
         // TEST 4: Stall — valid_out should not change
         $display("\n--- TEST 4: Stall prevents new fetch ---");

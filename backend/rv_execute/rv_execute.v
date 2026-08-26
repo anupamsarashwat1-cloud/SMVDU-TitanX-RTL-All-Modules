@@ -68,11 +68,23 @@ module rv_execute (
     // -------------------------------------------------------
     // Forwarding MUXes
     // -------------------------------------------------------
-    wire [63:0] src1 = (fwd_mem_valid && (fwd_mem_rd == rs1_addr) && (rs1_addr != 5'h0)) ? fwd_mem_data :
+    // EX-stage pass-through: the instruction one slot ahead of the consumer
+    // sits in our own EX->MEM pipeline registers — its result must forward
+    // here or every distance-1 RAW hazard reads stale data. Loads are
+    // excluded: during their memory access alu_result holds the ADDRESS,
+    // not data; load-use is covered by mem_stall plus the MEM-stage
+    // forwarding path instead.
+    wire        fwd_ex_valid = valid_out && reg_write_out && !mem_read_out;
+    wire [4:0]  fwd_ex_rd    = rd_out;
+    wire [63:0] fwd_ex_data  = alu_result;
+
+    wire [63:0] src1 = (fwd_ex_valid   && (fwd_ex_rd   == rs1_addr) && (rs1_addr != 5'h0)) ? fwd_ex_data  :
+                       (fwd_mem_valid && (fwd_mem_rd == rs1_addr) && (rs1_addr != 5'h0)) ? fwd_mem_data :
                        (fwd_wb_valid  && (fwd_wb_rd  == rs1_addr) && (rs1_addr != 5'h0)) ? fwd_wb_data  :
                        rs1_data;
 
-    wire [63:0] src2_reg = (fwd_mem_valid && (fwd_mem_rd == rs2_addr) && (rs2_addr != 5'h0)) ? fwd_mem_data :
+    wire [63:0] src2_reg = (fwd_ex_valid   && (fwd_ex_rd   == rs2_addr) && (rs2_addr != 5'h0)) ? fwd_ex_data  :
+                           (fwd_mem_valid && (fwd_mem_rd == rs2_addr) && (rs2_addr != 5'h0)) ? fwd_mem_data :
                            (fwd_wb_valid  && (fwd_wb_rd  == rs2_addr) && (rs2_addr != 5'h0)) ? fwd_wb_data  :
                            rs2_data;
 
@@ -85,6 +97,14 @@ module rv_execute (
                    (opcode == `OP_LUI)   || (opcode == `OP_AUIPC);
 
     wire [63:0] src2 = use_imm ? imm : src2_reg;
+
+    // RV64I *32 word-ops live ONLY in OP-IMM-32/OP-32: compute on the low
+    // word, sign-extend the result to 64 bits, and take shift amounts from
+    // [4:0]. Without the narrowing, ADDIW overflow kept garbage in the top
+    // half (0x7FFFFFFF+1 yielded 0x0000000080000000, not sign-extended)
+    // and W-shifts answered the 64-bit question.
+    wire is_wop = (opcode == `OP_IMM64) || (opcode == `OP_REG64);
+    wire [5:0] shamt = is_wop ? {1'b0, src2[4:0]} : src2[5:0];
 
     // -------------------------------------------------------
     // Integer ALU (combinational)
@@ -99,9 +119,18 @@ module rv_execute (
             `ALU_XOR:    alu_res_comb = src1 ^ src2;
             `ALU_OR:     alu_res_comb = src1 | src2;
             `ALU_AND:    alu_res_comb = src1 & src2;
-            `ALU_SLL:    alu_res_comb = src1 << src2[5:0];
-            `ALU_SRL:    alu_res_comb = src1 >> src2[5:0];
-            `ALU_SRA:    alu_res_comb = $signed(src1) >>> src2[5:0];
+            // W-form right-shifts must shift the ISOLATED 32-bit operand:
+            // shifting the full 64-bit register slides dirty upper bits
+            // down into the result's low word before the post-hoc narrow,
+            // which answers a different question than SRLW/SRAW. Left
+            // shifts are immune (garbage exits upward past the narrow).
+            `ALU_SLL:    alu_res_comb = (is_wop ? {32'b0, src1[31:0]}
+                                                : src1) << shamt;
+            `ALU_SRL:    alu_res_comb = (is_wop ? {32'b0, src1[31:0]}
+                                                : src1) >> shamt;
+            `ALU_SRA:    alu_res_comb = $signed(is_wop
+                                                ? {{32{src1[31]}}, src1[31:0]}
+                                                : src1) >>> shamt;
             `ALU_LUI:    alu_res_comb = src2;
             `ALU_AUIPC:  alu_res_comb = pc_in + src2;
             `ALU_COPY_B: alu_res_comb = src2;
@@ -282,9 +311,15 @@ module rv_execute (
                     (opcode == `OP_FMSUB)  || (opcode == `OP_FNMSUB) ||
                     (opcode == `OP_FNMADD);
 
+    // Word-op result narrowing: sext32 of the computed low word. W-forms
+    // never collide with the jump/FP/M-ext branches above, so ordering
+    // here is only about keeping the default integer path last.
+    wire [63:0] alu_res_w = {{32{alu_res_comb[31]}}, alu_res_comb[31:0]};
+
     wire [63:0] final_alu_res = (jal || jalr)   ? (pc_in + 64'd4)  :
                                  is_fp_op         ? fpu_result        :
                                  is_mext          ? mext_result        :
+                                 is_wop           ? alu_res_w          :
                                                     alu_res_comb;
 
     // -------------------------------------------------------

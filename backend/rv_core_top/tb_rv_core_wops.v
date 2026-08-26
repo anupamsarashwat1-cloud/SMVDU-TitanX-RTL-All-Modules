@@ -1,23 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-// SMVDU-TitanX SoC — rv_core_top Retirement-Spine Self-Checking Testbench
+// SMVDU-TitanX SoC — rv_core_top W-op (RV64I *32) Retirement Testbench
 //
-// Runs a generated RV64I program (scripts/gen_core_test.py) through the
-// five-stage spine against behavioral AXI-Lite instruction/data slaves,
-// then verifies:
-//   1. every architectural register final against tb_expected_regs.mem
-//      (shadow model built by SNOOPING the real writeback port, so a
-//      broken retirement path fails loudly instead of silently),
-//   2. every touched memory word against tb_expected_mval.mem,
-//   3. commit/store counters against tb_expected_meta.mem,
-//   4. no X on the result/writeback buses at end of run.
+// Structural twin of tb_rv_core_top running scripts/gen_wops_test.py's
+// program: every RV64I word-form instruction (ADDIW/SLLIW/SRLIW/SRAIW,
+// ADDW/SUBW/SLLW/SRLW/SRAW) against overflow / high-dirty / dirty-shamt
+// operands. Same verification contract: shadow RF from the live writeback
+// port, memory words, commit/store counters, X checks.
 //
-// Expectation files are loaded repo-root-relative (the regression runner's
-// cwd): backend/rv_core_top/tb_*.{hex,mem}
+// Expectation files load repo-root-relative: backend/rv_core_top/tb_wops_*.
 `timescale 1ns/1ps
 
-module tb_rv_core_top();
-    localparam BASE  = 64'h0000_0000_0002_0000;   // params.vh RESET_PC
-    localparam DBASE = 64'h0000_0000_8000_0000;   // DDR window base
+module tb_rv_core_wops();
+    localparam BASE  = 64'h0000_0000_0002_0000;
+    localparam DBASE = 64'h0000_0000_8000_0000;
 
     reg  clk;
     reg  rst_n;
@@ -154,24 +149,13 @@ module tb_rv_core_top();
 
     assign dmem_awready = !ds_aw_pend;
     assign dmem_wready  = !ds_w_pend;
-    // The write-response port MUST be driven from ds_bvalid. It wasn't —
-    // the reg completed transactions internally while the port sat
-    // undriven, so the core waited on a B beat that never existed on the
-    // wire and mem_stall pinned the whole pipeline after the first store.
     assign dmem_bvalid  = ds_bvalid && rst_n;
-    // B-response code: OKAY (slave never errors here).
     assign dmem_bresp   = 2'b00;
 
     wire [63:0] ds_word_ix = ({24'h0, ds_aw_addr} - DBASE) >> 3;
-    // Sub-word accesses are legal at ANY byte offset inside the window —
-    // the write strobes / load-extract logic handle lane selection. The
-    // old 8-byte-alignment clause here silently dropped every sh/sb/sw
-    // and sub-word load that wasn't word-aligned. (An earlier version of
-    // this line was the phantom "dmem OOB store" source.)
     wire        ds_oob = (ds_aw_addr < DBASE) ||
                          ((({24'h0, ds_aw_addr} - DBASE) >> 3) >= 2048);
 
-    // Read half
     localparam DS_AR = 1'b0, DS_R = 1'b1;
     reg        ds_rstate;
     reg [39:0] ds_ar_addr;
@@ -220,7 +204,6 @@ module tb_rv_core_top();
             end
             if (ds_bvalid && dmem_bready)
                 ds_bvalid <= 1'b0;
-            // read channel
             case (ds_rstate)
                 DS_AR: if (dmem_arvalid && dmem_arready) begin
                     ds_ar_addr <= dmem_araddr;
@@ -241,7 +224,6 @@ module tb_rv_core_top();
     // ------------------------------------------------------------
     // Architectural monitors
     // ------------------------------------------------------------
-    // Shadow register file built EXCLUSIVELY from the live writeback port.
     reg [63:0] shadow   [0:31];
     reg [63:0] exp_regs [0:31];
     reg [63:0] exp_maddr[0:63];
@@ -257,27 +239,11 @@ module tb_rv_core_top();
             if (uut.wb_we && uut.wb_rd != 5'h0) begin
                 shadow[uut.wb_rd] <= uut.wb_data;
                 n_commits <= n_commits + 1;
-                if (^uut.wb_data !== 1'bx)
-                    $display("TRACE [%0t] WB x%0d <= 0x%h",
-                             $time, uut.wb_rd, uut.wb_data);
             end
             if (dmem_bvalid && dmem_bready)
                 n_stores <= n_stores + 1;
         end
     end
-
-    // Bus-issue trace: every store/load the core puts on the wire.
-    always @(posedge clk)
-        if (rst_n && dmem_awvalid && dmem_awready)
-            $display("TRACE [%0t] ST addr=0x%h data=0x%h strb=%b",
-                     $time, dmem_awaddr, dmem_wdata, dmem_wstrb);
-    always @(posedge clk)
-        if (rst_n && dmem_arvalid && dmem_arready)
-            $display("TRACE [%0t] LD addr=0x%h", $time, dmem_araddr);
-    always @(posedge clk)
-        if (rst_n && dmem_bvalid)
-            $display("TRACE [%0t] B  bvalid=%b bready=%b",
-                     $time, dmem_bvalid, dmem_bready);
 
     task fail;
         input [511:0] msg;
@@ -288,13 +254,8 @@ module tb_rv_core_top();
     endtask
 
     initial begin
-        $dumpfile("tb_rv_core_top.vcd");
-        $dumpvars(1, tb_rv_core_top);     // top-level ports
-        $dumpvars(0, uut.u_fetch);
-        $dumpvars(0, uut.u_decode);
-        $dumpvars(0, uut.u_execute);
-        $dumpvars(0, uut.u_mem);
-        $dumpvars(0, uut.u_wb);
+        $dumpfile("tb_rv_core_wops.vcd");
+        $dumpvars(1, tb_rv_core_wops);
 
         error_count = 0;
         irq_m_ext = 0; irq_m_timer = 0; irq_m_soft = 0;
@@ -305,13 +266,13 @@ module tb_rv_core_top();
         for (b = 0; b < 2048; b = b + 1) dmem[b] = 64'h0;
         for (b = 0; b < 4096; b = b + 1) imem[b] = 32'h0000_0013; // NOP fill
 
-        $readmemh("backend/rv_core_top/tb_imem.hex", imem);
-        $readmemh("backend/rv_core_top/tb_expected_regs.mem", exp_regs);
-        $readmemh("backend/rv_core_top/tb_expected_maddr.mem", exp_maddr);
-        $readmemh("backend/rv_core_top/tb_expected_mval.mem", exp_mval);
-        $readmemh("backend/rv_core_top/tb_expected_meta.mem", meta);
+        $readmemh("backend/rv_core_top/tb_wops_imem.hex", imem);
+        $readmemh("backend/rv_core_top/tb_wops_expected_regs.mem", exp_regs);
+        $readmemh("backend/rv_core_top/tb_wops_expected_maddr.mem", exp_maddr);
+        $readmemh("backend/rv_core_top/tb_wops_expected_mval.mem", exp_mval);
+        $readmemh("backend/rv_core_top/tb_wops_expected_meta.mem", meta);
         if (^imem[0] === 1'bx) begin
-            fail("program hex did not load — run scripts/gen_core_test.py");
+            fail("wops program hex did not load — run scripts/gen_wops_test.py");
             $display("REGRESS_RESULT: FAIL");
             $finish;
         end
@@ -320,21 +281,15 @@ module tb_rv_core_top();
         #40;
         rst_n = 1;
 
-        // Run the program to completion (it parks on jal-to-self)
         begin : run
             integer cyc;
-            for (cyc = 0; cyc < 30000; cyc = cyc + 1) begin
+            for (cyc = 0; cyc < 30000; cyc = cyc + 1)
                 @(posedge clk);
-                if ((cyc % 5000) == 0 && cyc > 0)
-                    $display("INFO [%0t] cycle %0d commits=%0d stores=%0d",
-                             $time, cyc, n_commits, n_stores);
-            end
         end
 
         halt_req = 1;
         repeat (8) @(posedge clk);
 
-        // ---- architectural verification ----
         $display("\n--- Verification ---");
         $display("INFO: rf commits=%0d (expect >=%0d), stores=%0d (expect >=%0d)",
                  n_commits, meta[0], n_stores, meta[1]);
@@ -387,10 +342,10 @@ module tb_rv_core_top();
 
         $display("\n==============================");
         if (error_count == 0) begin
-            $display("RV_CORE_TOP VERDICT: ✅ PASS — program retired correctly");
+            $display("RV_CORE_WOPS VERDICT: ✅ PASS — W-op program retired correctly");
             $display("REGRESS_RESULT: PASS");
         end else begin
-            $display("RV_CORE_TOP VERDICT: ❌ FAIL — %0d errors", error_count);
+            $display("RV_CORE_WOPS VERDICT: ❌ FAIL — %0d errors", error_count);
             $display("REGRESS_RESULT: FAIL");
         end
         $display("==============================\n");
@@ -400,7 +355,7 @@ module tb_rv_core_top();
     initial begin
         #600_000;
         $display("WATCHDOG TIMEOUT — program did not finish within horizon");
-        $display("RV_CORE_TOP VERDICT: ❌ FAIL — watchdog");
+        $display("RV_CORE_WOPS VERDICT: ❌ FAIL — watchdog");
         $display("REGRESS_RESULT: FAIL");
         $finish;
     end

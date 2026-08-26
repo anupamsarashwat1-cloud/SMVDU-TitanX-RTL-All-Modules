@@ -4,7 +4,7 @@
 // Outputs appear at the posedge AFTER valid_in is presented (1-cycle latency).
 // We must capture outputs BEFORE clearing the inputs.
 `timescale 1ns/1ps
-`include "isa_constants.vh"
+`include "isa_pkg.vh"
 
 module tb_rv_decode();
     reg        clk, rst_n, stall, flush;
@@ -88,7 +88,7 @@ module tb_rv_decode();
         check(rd,        5'd1,    "rd=1 for ADDI x1,x0,42");
         check(rs1_addr,  5'd0,    "rs1=0 for ADDI x1,x0,42");
         check(imm,       64'd42,  "imm=42 for ADDI");
-        check(alu_op,    ALU_ADD, "alu_op=ALU_ADD for ADDI");
+        check(alu_op,    `ALU_ADD, "alu_op=ALU_ADD for ADDI");
         check(reg_write, 1'b1,    "reg_write=1 for ADDI");
         check(mem_read,  1'b0,    "mem_read=0 for ADDI");
         check(valid_out, 1'b1,    "valid_out=1 for ADDI");
