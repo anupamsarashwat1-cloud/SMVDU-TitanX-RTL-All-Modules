@@ -379,7 +379,7 @@ module rv_execute (
     wire csr_commit   = ex_exit && is_csr;
     wire mret_commit  = ex_exit && is_mret;
     wire trap_commit  = ex_exit && (is_ecall || is_ebreak || sys_illegal ||
-                                    csr_illegal);
+                                    csr_illegal || irq_take);
 
     wire [11:0] csr_a = imm[11:0];
     wire        csr_rmw = (csr_op == 2'b10) || (csr_op == 2'b11);
@@ -401,15 +401,28 @@ module rv_execute (
                            (csr_op == 2'b10) ? (csr_old | src1) :
                                                (csr_old & ~src1);
 
+    // Interrupt selection (Step 5.6). irq_pend already folds in mie enable
+    // and mstatus.MIE inside rv_csr. Priority external > software > timer
+    // is our documented choice (spec leaves M-mode priority open). Causes
+    // carry the interrupt bit (63) per privileged spec.
+    wire irq_sel_ext   = irq_pend && irq_m_ext;
+    wire irq_sel_soft  = irq_pend && !irq_m_ext && irq_m_soft;
+    wire irq_sel_timer = irq_pend && !irq_m_ext && !irq_m_soft &&
+                         irq_m_timer;
+
     reg [63:0] trap_cause_w;
     always @(*) begin
-        if (sys_illegal || csr_illegal)
+        if (irq_sel_ext)    trap_cause_w = (64'd1 << 63) | 64'd11;
+        else if (irq_sel_soft) trap_cause_w = (64'd1 << 63) | 64'd3;
+        else if (irq_sel_timer) trap_cause_w = (64'd1 << 63) | 64'd7;
+        else if (sys_illegal || csr_illegal)
                             trap_cause_w = 64'd2;    // illegal instruction
         else if (is_ebreak) trap_cause_w = 64'd3;    // breakpoint
         else                trap_cause_w = 64'd11;   // ecall from M-mode
     end
 
     wire [63:0] csr_old, mtvec_q, mepc_q;
+    wire        irq_pend;
     rv_csr u_csr (
         .clk          (clk),
         .rst_n        (rst_n),
@@ -428,7 +441,7 @@ module rv_execute (
         .retire_pulse (ex_exit),
         .mtvec_out    (mtvec_q),
         .mepc_out     (mepc_q),
-        .irq_pending  ()                  // consumed at the CLINT step
+        .irq_pending  (irq_pend)          // consumed below (Step 5.6)
     );
 
     // -------------------------------------------------------
@@ -457,6 +470,15 @@ module rv_execute (
                       (is_ecall || is_ebreak || sys_illegal || csr_illegal);
     wire mret_req_c = valid_in && !stall && !flush &&
                       !mul_div_stall && !mx_fin && is_mret;
+    // Preemption point: the beat leaving EX is redirected to mtvec instead
+    // of retiring. Never preempted-beat: an mret (else a pending IRQ would
+    // trap straight out of the restore) or an exception beat (exception
+    // wins per spec ordering). Everything else — ALU, CSR, loads, stores,
+    // even the beat after a multicycle op — is fair game; the killed beat
+    // re-executes from its own PC after the handler's mret.
+    wire irq_take   = ex_exit &&
+                      (irq_sel_ext || irq_sel_soft || irq_sel_timer) &&
+                      !mret_req_c && !trap_req_c;
 
     reg branch_comb;
     always @(*) begin
@@ -471,15 +493,18 @@ module rv_execute (
                 3'b111: branch_comb = (src1 >= src2_reg);
                 default: branch_comb = 1'b0;
             endcase
-        end else if (jal || jalr || trap_req_c || mret_req_c) begin
-            // Traps and mret reuse the branch redirect machinery: PC goes
-            // to mtvec/mepc, fetch+decode flush exactly like a taken jump.
+        end else if (jal || jalr || trap_req_c || mret_req_c ||
+                     irq_take) begin
+            // Traps, mret, and IRQ preemption reuse the branch redirect
+            // machinery: PC goes to mtvec/mepc, fetch+decode flush exactly
+            // like a taken jump.
             branch_comb = 1'b1;
         end
     end
 
     wire [63:0] branch_tgt =
         jalr       ? ((src1 + imm) & ~64'd1) :
+        irq_take   ? mtvec_q :
         trap_req_c ? mtvec_q :
         mret_req_c ? mepc_q  :
                      (pc_in + imm);
@@ -575,11 +600,12 @@ module rv_execute (
             rd_out        <= rd_in;
             funct3_out    <= funct3;
             opcode_out    <= opcode;
-            mem_read_out  <= mem_read;
-            mem_write_out <= mem_write;
-            // A trapping instruction commits nothing: kill its rd write so
-            // the beat retires as a pure bubble downstream.
-            reg_write_out <= reg_write && !trap_req_c &&
+            // An interrupted or trapping beat commits NOTHING — including
+            // no bus side effects: a preempted store must not reach the
+            // interconnect (it re-executes after the handler returns).
+            mem_read_out  <= mem_read && !irq_take && !trap_req_c;
+            mem_write_out <= mem_write && !irq_take && !trap_req_c;
+            reg_write_out <= reg_write && !trap_req_c && !irq_take &&
                              (!is_fp_op || fpu_done);
             is_amo_out    <= is_amo;
             amo_funct5_out<= amo_funct5;
