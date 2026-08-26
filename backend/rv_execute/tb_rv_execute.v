@@ -14,6 +14,11 @@ module tb_rv_execute();
     reg [4:0]  alu_op;
     reg        mem_read, mem_write, reg_write, branch, jal, jalr;
     reg        is_amo; reg [4:0] amo_funct5;
+    // SYSTEM controls (Step 5.4) — tied off below; CSR/trap semantics are
+    // covered at the core level (tb_rv_core_csr) and by tb_rv_csr.
+    reg        is_csr; reg [1:0] csr_op;
+    reg        is_ecall, is_ebreak, is_mret;
+    reg        irq_m_ext, irq_m_timer, irq_m_soft;
     reg        valid_in;
     reg [63:0] fwd_mem_data; reg fwd_mem_valid; reg [4:0] fwd_mem_rd;
     reg [63:0] fwd_wb_data;  reg fwd_wb_valid;  reg [4:0] fwd_wb_rd;
@@ -46,6 +51,9 @@ module tb_rv_execute();
         .mem_read(mem_read), .mem_write(mem_write), .reg_write(reg_write),
         .branch(branch), .jal(jal), .jalr(jalr),
         .is_amo(is_amo), .amo_funct5(amo_funct5), .valid_in(valid_in),
+        .is_csr(is_csr), .csr_op(csr_op),
+        .is_ecall(is_ecall), .is_ebreak(is_ebreak), .is_mret(is_mret),
+        .irq_m_ext(irq_m_ext), .irq_m_timer(irq_m_timer), .irq_m_soft(irq_m_soft),
         .fwd_mem_data(fwd_mem_data), .fwd_mem_valid(fwd_mem_valid), .fwd_mem_rd(fwd_mem_rd),
         .fwd_wb_data(fwd_wb_data), .fwd_wb_valid(fwd_wb_valid), .fwd_wb_rd(fwd_wb_rd),
         .fpu_result(fpu_result), .fpu_valid(fpu_valid), .fpu_done(fpu_done),
@@ -94,6 +102,8 @@ module tb_rv_execute();
         rd_in=0; rs1_addr=0; rs2_addr=0; funct3=0; funct7=0; opcode=7'h33;
         alu_op=0; mem_read=0; mem_write=0; reg_write=0;
         branch=0; jal=0; jalr=0; is_amo=0; amo_funct5=0; valid_in=0;
+        is_csr=0; csr_op=0; is_ecall=0; is_ebreak=0; is_mret=0;
+        irq_m_ext=0; irq_m_timer=0; irq_m_soft=0;
         fwd_mem_data=0; fwd_mem_valid=0; fwd_mem_rd=0;
         fwd_wb_data=0; fwd_wb_valid=0; fwd_wb_rd=0;
         fpu_result=0; fpu_valid=0; fpu_done=0;

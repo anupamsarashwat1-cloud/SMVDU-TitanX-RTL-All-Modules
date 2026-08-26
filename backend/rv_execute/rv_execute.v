@@ -31,6 +31,17 @@ module rv_execute (
     input  wire        jalr,
     input  wire        is_amo,      // A-extension: AMO instruction
     input  wire [4:0]  amo_funct5,  // AMO operation code [31:27]
+    // SYSTEM stage controls (Phase 5 Step 5.4)
+    input  wire        is_csr,
+    input  wire [1:0]  csr_op,      // 01 W, 10 S, 11 C
+    input  wire        is_ecall,
+    input  wire        is_ebreak,
+    input  wire        is_mret,
+    // machine interrupt pending lines (CLINT/PLIC glue arrives later;
+    // passed straight into the CSR file's mip inputs)
+    input  wire        irq_m_ext,
+    input  wire        irq_m_timer,
+    input  wire        irq_m_soft,
     input  wire        valid_in,
     // Forwarding from MEM and WB
     input  wire [63:0] fwd_mem_data,
@@ -349,6 +360,78 @@ module rv_execute (
     wire [63:0] mext_result = mext_final;
 
     // -------------------------------------------------------
+    // Zicsr / privileged simples (Step 5.4)
+    //
+    // rv_csr is instantiated HERE (house style: regfile lives in decode).
+    // Read is combinational (result mux below); writes and trap/mret
+    // status shuffles pulse ONLY on the instruction's exit from EX — the
+    // same edge its beat enters EX->MEM — so stalled, flushed, and
+    // engine-held instructions never touch architectural state.
+    // Distance-1 CSR RAW needs no forwarding: a younger CSR op reaches
+    // EX at least one cycle after the older one's synchronous write.
+    // -------------------------------------------------------
+    wire sys_present  = valid_in && (opcode == `OP_SYSTEM);
+    wire sys_illegal  = sys_present && !is_csr && !is_ecall &&
+                        !is_ebreak && !is_mret;
+
+    wire ex_exit      = valid_in && !stall && !flush &&
+                        !mul_div_stall && !mx_fin;
+    wire csr_commit   = ex_exit && is_csr;
+    wire mret_commit  = ex_exit && is_mret;
+    wire trap_commit  = ex_exit && (is_ecall || is_ebreak || sys_illegal ||
+                                    csr_illegal);
+
+    wire [11:0] csr_a = imm[11:0];
+    wire        csr_rmw = (csr_op == 2'b10) || (csr_op == 2'b11);
+    // CSRRS/CSRRC with rs1=x0 read only — spec forbids side effects there.
+    // Implemented-set decoder (must mirror rv_csr's read decode): access
+    // to any other address raises illegal-instruction per the Zicsr spec.
+    wire csr_impl = (csr_a == 12'h300) || (csr_a == 12'h301) ||
+                    (csr_a == 12'h304) || (csr_a == 12'h305) ||
+                    (csr_a == 12'h340) || (csr_a == 12'h341) ||
+                    (csr_a == 12'h342) || (csr_a == 12'h343) ||
+                    (csr_a == 12'hF14) || (csr_a == 12'hB00) ||
+                    (csr_a == 12'hB02) || (csr_a == 12'hC00) ||
+                    (csr_a == 12'hC02);
+    wire csr_illegal = sys_present && is_csr && !csr_impl;
+
+    wire        csr_we_w = csr_commit && !csr_illegal &&
+                           !(csr_rmw && (rs1_addr == 5'h0));
+    wire [63:0] csr_wd   = (csr_op == 2'b01) ? src1 :
+                           (csr_op == 2'b10) ? (csr_old | src1) :
+                                               (csr_old & ~src1);
+
+    reg [63:0] trap_cause_w;
+    always @(*) begin
+        if (sys_illegal || csr_illegal)
+                            trap_cause_w = 64'd2;    // illegal instruction
+        else if (is_ebreak) trap_cause_w = 64'd3;    // breakpoint
+        else                trap_cause_w = 64'd11;   // ecall from M-mode
+    end
+
+    wire [63:0] csr_old, mtvec_q, mepc_q;
+    rv_csr u_csr (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .csr_raddr    (csr_a),
+        .csr_rdata    (csr_old),
+        .csr_we       (csr_we_w),
+        .csr_waddr    (csr_a),
+        .csr_wdata    (csr_wd),
+        .trap_we      (trap_commit),
+        .trap_pc      (pc_in),
+        .trap_cause   (trap_cause_w),
+        .mret_we      (mret_commit),
+        .mip_m_ext    (irq_m_ext),
+        .mip_m_timer  (irq_m_timer),
+        .mip_m_soft   (irq_m_soft),
+        .retire_pulse (ex_exit),
+        .mtvec_out    (mtvec_q),
+        .mepc_out     (mepc_q),
+        .irq_pending  ()                  // consumed at the CLINT step
+    );
+
+    // -------------------------------------------------------
     // A-Extension: LR/SC Reservation
     // -------------------------------------------------------
     // LR: set reservation; SC: check reservation
@@ -369,6 +452,12 @@ module rv_execute (
     // -------------------------------------------------------
     // Branch Decision (combinational)
     // -------------------------------------------------------
+    wire trap_req_c = valid_in && !stall && !flush &&
+                      !mul_div_stall && !mx_fin &&
+                      (is_ecall || is_ebreak || sys_illegal || csr_illegal);
+    wire mret_req_c = valid_in && !stall && !flush &&
+                      !mul_div_stall && !mx_fin && is_mret;
+
     reg branch_comb;
     always @(*) begin
         branch_comb = 1'b0;
@@ -382,12 +471,18 @@ module rv_execute (
                 3'b111: branch_comb = (src1 >= src2_reg);
                 default: branch_comb = 1'b0;
             endcase
-        end else if (jal || jalr) begin
+        end else if (jal || jalr || trap_req_c || mret_req_c) begin
+            // Traps and mret reuse the branch redirect machinery: PC goes
+            // to mtvec/mepc, fetch+decode flush exactly like a taken jump.
             branch_comb = 1'b1;
         end
     end
 
-    wire [63:0] branch_tgt = jalr ? ((src1 + imm) & ~64'd1) : (pc_in + imm);
+    wire [63:0] branch_tgt =
+        jalr       ? ((src1 + imm) & ~64'd1) :
+        trap_req_c ? mtvec_q :
+        mret_req_c ? mepc_q  :
+                     (pc_in + imm);
 
     // -------------------------------------------------------
     // Result Mux: Integer / M-ext / FPU
@@ -404,6 +499,7 @@ module rv_execute (
     wire [63:0] final_alu_res = (jal || jalr)   ? (pc_in + 64'd4)  :
                                  is_fp_op         ? fpu_result        :
                                  is_mext          ? mext_result        :
+                                 is_csr           ? csr_old           :
                                  is_wop           ? alu_res_w          :
                                                     alu_res_comb;
 
@@ -481,7 +577,10 @@ module rv_execute (
             opcode_out    <= opcode;
             mem_read_out  <= mem_read;
             mem_write_out <= mem_write;
-            reg_write_out <= reg_write && (!is_fp_op || fpu_done);
+            // A trapping instruction commits nothing: kill its rd write so
+            // the beat retires as a pure bubble downstream.
+            reg_write_out <= reg_write && !trap_req_c &&
+                             (!is_fp_op || fpu_done);
             is_amo_out    <= is_amo;
             amo_funct5_out<= amo_funct5;
             valid_out     <= valid_in;

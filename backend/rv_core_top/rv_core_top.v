@@ -147,6 +147,10 @@ module rv_core_top #(
     wire [6:0]  de_f7, de_op;
     wire [4:0]  de_aluop;
     wire        de_memr, de_memw, de_regw, de_branch, de_jal, de_jalr, de_valid;
+    // SYSTEM controls (Step 5.4)
+    wire        de_iscsr;
+    wire [1:0]  de_csrop;
+    wire        de_ecall, de_ebreak, de_mret;
 
     // Writeback feedback into the register file — the path that was tied
     // to zero in every previous iteration of this top.
@@ -166,7 +170,10 @@ module rv_core_top #(
         .funct3    (de_f3),       .funct7   (de_f7),       .opcode   (de_op),
         .alu_op    (de_aluop),    .mem_read (de_memr),     .mem_write(de_memw),
         .reg_write (de_regw),     .branch   (de_branch),   .jal      (de_jal),
-        .jalr      (de_jalr),     .valid_out(de_valid)
+        .jalr      (de_jalr),
+        .is_csr    (de_iscsr),    .csr_op   (de_csrop),
+        .is_ecall  (de_ecall),    .is_ebreak(de_ebreak),   .is_mret  (de_mret),
+        .valid_out(de_valid)
     );
 
     // -------------------------------------------------------
@@ -200,6 +207,11 @@ module rv_core_top #(
         .reg_write    (de_regw),    .branch       (de_branch), .jal         (de_jal),
         .jalr         (de_jalr),
         .is_amo       (1'b0),       .amo_funct5   (5'h0),      // A-ext decodes later
+        .is_csr       (de_iscsr),   .csr_op       (de_csrop),
+        .is_ecall     (de_ecall),   .is_ebreak    (de_ebreak),
+        .is_mret      (de_mret),
+        .irq_m_ext    (irq_m_ext),  .irq_m_timer  (irq_m_timer),
+        .irq_m_soft   (irq_m_soft),
         .valid_in     (de_valid),
         .fwd_mem_data (fwd_mem_data), .fwd_mem_valid(fwd_mem_valid), .fwd_mem_rd(fwd_mem_rd),
         .fwd_wb_data  (fwd_wb_data),  .fwd_wb_valid (fwd_wb_valid),  .fwd_wb_rd (fwd_wb_rd),

@@ -37,6 +37,12 @@ module rv_decode (
     output reg         branch,
     output reg         jal,
     output reg         jalr,
+    // SYSTEM (Zicsr + privileged simples, Phase 5 Step 5.4)
+    output reg         is_csr,
+    output reg  [1:0]  csr_op,      // f3[1:0]: 01 W, 10 S, 11 C
+    output reg         is_ecall,
+    output reg         is_ebreak,
+    output reg         is_mret,
     output reg         valid_out
 );
     wire [6:0] op   = instr_in[6:0];
@@ -50,6 +56,8 @@ module rv_decode (
     reg [63:0] imm_comb;
     reg [4:0]  alu_op_comb;
     reg        mem_r_comb, mem_w_comb, reg_w_comb, br_comb, jal_comb, jalr_comb;
+    reg        csr_comb, ec_comb, eb_comb, mret_comb;
+    reg [1:0]  csrop_comb;
 
     always @(*) begin
         imm_comb    = 64'h0;
@@ -60,6 +68,11 @@ module rv_decode (
         br_comb     = 1'b0;
         jal_comb    = 1'b0;
         jalr_comb   = 1'b0;
+        csr_comb    = 1'b0;
+        ec_comb     = 1'b0;
+        eb_comb     = 1'b0;
+        mret_comb   = 1'b0;
+        csrop_comb  = 2'b00;
 
         case (op)
             `OP_LUI: begin
@@ -159,9 +172,32 @@ module rv_decode (
                     default: alu_op_comb = `ALU_ADD;
                 endcase
             end
+            `OP_SYSTEM: begin
+                // Zicsr + privileged simples. The CSR address rides the
+                // imm field (no extra datapath). funct3[2] marks the
+                // immediate forms: rs1 field is a zimm VALUE, not an
+                // index — Block 3 substitutes {59'b0, r_rs1}.
+                if (f3 == 3'b000) begin
+                    case (instr_in[31:20])
+                        12'h000: ec_comb   = 1'b1;    // ECALL
+                        12'h001: eb_comb   = 1'b1;    // EBREAK
+                        12'h302: mret_comb = 1'b1;    // MRET
+                        default: ;                    // unrecognized SYSTEM
+                                                      // -> execute raises
+                                                      // illegal-instruction
+                    endcase
+                end else begin
+                    csr_comb   = 1'b1;
+                    csrop_comb = f3[1:0];
+                    imm_comb   = {52'h0, instr_in[31:20]};
+                    reg_w_comb = 1'b1;            // rd <- old value (x0 discards)
+                end
+            end
             default: begin end
         endcase
     end
+
+    wire zimm_form = (op == `OP_SYSTEM) && f3[2];
 
     // Register file: dedicated module (unit-tested under backend/rv_regfile),
     // written from the writeback stage through the wb_* feedback port.
@@ -213,7 +249,9 @@ module rv_decode (
             rs1_data  <= 64'h0;
         end else if (!stall) begin
             rs1_data  <= (wb_we && wb_rd == r_rs1 && r_rs1 != 5'h0) ?
-                         wb_data : rf_rs1_data;
+                         wb_data :
+                         zimm_form ? {59'b0, r_rs1} :   // CSRR*I: field is a value
+                         rf_rs1_data;
         end
     end
 
@@ -245,6 +283,11 @@ module rv_decode (
             branch    <= 1'b0;
             jal       <= 1'b0;
             jalr      <= 1'b0;
+            is_csr    <= 1'b0;
+            csr_op    <= 2'b00;
+            is_ecall  <= 1'b0;
+            is_ebreak <= 1'b0;
+            is_mret   <= 1'b0;
             valid_out <= 1'b0;
         end else if (flush_buf5) begin
             rd        <= 5'h0;
@@ -260,6 +303,11 @@ module rv_decode (
             branch    <= 1'b0;
             jal       <= 1'b0;
             jalr      <= 1'b0;
+            is_csr    <= 1'b0;
+            csr_op    <= 2'b00;
+            is_ecall  <= 1'b0;
+            is_ebreak <= 1'b0;
+            is_mret   <= 1'b0;
             valid_out <= 1'b0;
         end else if (!stall) begin
             rd        <= r_rd;
@@ -275,6 +323,11 @@ module rv_decode (
             branch    <= br_comb;
             jal       <= jal_comb;
             jalr      <= jalr_comb;
+            is_csr    <= csr_comb;
+            csr_op    <= csrop_comb;
+            is_ecall  <= ec_comb;
+            is_ebreak <= eb_comb;
+            is_mret   <= mret_comb;
             valid_out <= valid_in;
         end
     end
