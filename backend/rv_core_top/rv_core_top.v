@@ -178,6 +178,11 @@ module rv_core_top #(
     wire [6:0]  ex_op;
     wire        ex_memr, ex_memw, ex_regw, ex_valid;
     wire        mul_div_stall;
+    // Execute qualifies its M-ext engine start with !stall — so it must
+    // NOT see the global net (which contains its own mul_div_stall; that
+    // self-referential loop is exactly what deadlocked MUL/DIV in the
+    // old scheme). Memory/halt stalls only.
+    wire        stall_ex;
 
     // Forwarding network
     wire [63:0] fwd_mem_data, fwd_wb_data;
@@ -186,7 +191,7 @@ module rv_core_top #(
 
     rv_execute u_execute (
         .clk          (clk),        .rst_n        (rst_n),
-        .stall        (stall),      .flush        (flush_de_4),
+        .stall        (stall_ex),   .flush        (flush_de_4),
         .pc_in        (de_pc),      .rs1_data     (de_rs1),    .rs2_data    (de_rs2),
         .imm          (de_imm),     .rd_in        (de_rd),
         .rs1_addr     (de_rs1a),    .rs2_addr     (de_rs2a),
@@ -282,6 +287,7 @@ module rv_core_top #(
     // what makes load-use hazards correct (consumer waits in EX, then takes
     // the value through the MEM forwarding path).
     assign stall = mul_div_stall || mem_stall || halt_req;
+    assign stall_ex = mem_stall || halt_req;   // execute's view: no self-loop
 
     // L2 snoop idle until the dcache returns behind the data port
     assign snoop_ack        = 1'b0;

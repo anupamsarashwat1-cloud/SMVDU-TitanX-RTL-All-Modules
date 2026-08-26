@@ -77,6 +77,9 @@ class Prog:
             raise ValueError(fn)
         if k == "rr":
             op = 0b0111011 if i.get("w") else 0b0110011
+            if i["fn"] in BASE_R_F7F3:          # plain integer ops mixed in
+                f7, f3 = BASE_R_F7F3[i["fn"]]
+                return self._r(f7, i["rs2"], i["rs1"], f3, i["rd"], op)
             return self._r(0b0000001, i["rs2"], i["rs1"],
                            MEXT_F3[i["fn"]], i["rd"], op)
         if k == "st":
@@ -89,6 +92,10 @@ MEXT_F3 = {"mul": 0b000, "mulh": 0b001, "mulhsu": 0b010, "mulhu": 0b011,
            "div": 0b100, "divu": 0b101, "rem": 0b110, "remu": 0b111,
            "mulw": 0b000, "divw": 0b100, "divuw": 0b101,
            "remw": 0b110, "remuw": 0b111}
+
+BASE_R_F7F3 = {"add": (0b0000000, 0b000), "sub": (0b0100000, 0b000),
+               "xor": (0b0000000, 0b100), "or":  (0b0000000, 0b110),
+               "and": (0b0000000, 0b111)}
 
 # ------------------------------------------------------------ golden model
 def run_golden(p):
@@ -172,6 +179,8 @@ def run_golden(p):
                 au32, bu32 = regs[i["rs1"]] & M32, regs[i["rs2"]] & M32
                 r = au32 if bu32 == 0 else au32 % bu32
                 wr = (i["rd"], to64(sext(r, 32)))
+            elif fn == "add":
+                wr = (i["rd"], to64(a + b))
             else:
                 raise ValueError(fn)
 
@@ -212,7 +221,6 @@ p.any(kind="ri", fn="addi",  rd=5, rs1=0, imm=0x123)
 p.any(kind="ri", fn="slli",  rd=5, rs1=5, shamt=12)        # 0x123000
 p.any(kind="ri", fn="addi",  rd=5, rs1=5, imm=0x456)
 p.any(kind="ri", fn="slli",  rd=5, rs1=5, shamt=16)        # 0x123456_0000
-p.any(kind="ri", fn="addi",  rd=6, rs1=5, rs1_shim := None or 5, imm=0) if False else None
 p.any(kind="ri", fn="addi",  rd=20, rs1=0, imm=1)
 p.any(kind="ri", fn="slli",  rd=20, rs1=20, shamt=31)      # x20 = DBASE
 
@@ -221,7 +229,10 @@ p.any(kind="rr", fn="mul",    rd=21, rs1=1, rs2=2)         # -21
 p.any(kind="rr", fn="mulh",   rd=22, rs1=3, rs2=4)         # INT64_MIN * -1 >>64 = 0x7FFF...
 p.any(kind="rr", fn="mulhsu", rd=23, rs1=3, rs2=4)         # signed * unsigned(all ones)
 p.any(kind="rr", fn="mulhu",  rd=24, rs1=3, rs2=4)         # unsigned * unsigned
-p.any(kind="rr", fn="mulw",   rd=25, rs1=3, rs2=4)         # word(INT_MIN)*word(-1) -> INT_MIN sext
+# NOTE the w=1 flags: encode() picks the *W opcode* from them, NOT from the
+# fn name — without them "mulw" encodes as plain MUL (0110011) and the RTL
+# correctly executes the wrong instruction. Caught exactly that way.
+p.any(kind="rr", fn="mulw",   rd=25, rs1=3, rs2=4, w=1)    # word(INT_MIN)*word(-1) -> INT_MIN sext
 
 # ---- Phase 3: divide battery incl. specials ----
 p.any(kind="rr", fn="div",    rd=13, rs1=3,  rs2=4)        # INT64_MIN / -1 overflow -> INT64_MIN
@@ -234,10 +245,18 @@ p.any(kind="rr", fn="div",    rd=19, rs1=5,  rs2=1)        # ordinary signed div
 p.any(kind="rr", fn="rem",    rd=26, rs1=5,  rs2=1)
 p.any(kind="rr", fn="divu",   rd=27, rs1=5,  rs2=2)
 p.any(kind="rr", fn="remu",   rd=28, rs1=5,  rs2=2)
-p.any(kind="rr", fn="divw",   rd=29, rs1=3,  rs2=4)        # word overflow -> INT32_MIN sext
-p.any(kind="rr", fn="divuw",  rd=30, rs1=2,  rs2=0)        # /0 -> 0xFFFFFFFF
-p.any(kind="rr", fn="remw",   rd=31, rs1=1,  rs2=0)        # -3 %w 0 -> -3 sext
-p.any(kind="rr", fn="remuw",  rd=5,  rs1=1,  rs2=0)        # -> 0xFFFFFFFD (overwrites x5)
+p.any(kind="rr", fn="divw",   rd=29, rs1=3,  rs2=4, w=1)   # word(0)/word(-1) -> 0
+p.any(kind="rr", fn="divuw",  rd=30, rs1=2,  rs2=0, w=1)   # /0 -> 0xFFFFFFFF
+p.any(kind="rr", fn="remw",   rd=31, rs1=1,  rs2=0, w=1)   # -3 %w 0 -> -3 sext
+p.any(kind="rr", fn="remuw",  rd=5,  rs1=1,  rs2=0, w=1)   # -> 0xFFFFFFFD (overwrites x5)
+
+# ---- Phase 3b: TRUE W-overflow specials on x20 = 0x00000000_80000000,
+# whose low word IS INT32_MIN (unlike x3=INT64_MIN, whose low word is 0).
+# divw hits the width-aware overflow detector; mulw proves the captured
+# sign-extended words feed the multiplier.
+p.any(kind="rr", fn="mulw",   rd=6,  rs1=20, rs2=4, w=1)   # (-2^31 * -1)&M32 -> sext 80000000
+p.any(kind="rr", fn="divw",   rd=7,  rs1=20, rs2=4, w=1)   # W-ovf special    -> sext 80000000
+p.any(kind="rr", fn="remw",   rd=8,  rs1=20, rs2=4, w=1)   #                  -> 0
 
 # ---- Phase 4: RAW chain through M results ----
 p.any(kind="rr", fn="add",    rd=21, rs1=21, rs2=22)       # consume two M results

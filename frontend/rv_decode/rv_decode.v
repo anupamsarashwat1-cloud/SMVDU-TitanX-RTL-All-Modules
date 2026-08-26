@@ -128,6 +128,23 @@ module rv_decode (
             end
             `OP_REG, `OP_REG64: begin
                 reg_w_comb = 1'b1;
+                if (f7 == 7'b0000001) begin
+                    // M-extension. Dispatched on the FULL funct7: the old
+                    // {f7[5],f3} table ignored f7[0], so every MUL/DIV
+                    // decoded as its base-op twin (MUL executed as ADD,
+                    // DIV as XOR).
+                    case (f3)
+                        3'b000: alu_op_comb = `ALU_MUL;
+                        3'b001: alu_op_comb = `ALU_MULH;
+                        3'b010: alu_op_comb = `ALU_MULHSU;
+                        3'b011: alu_op_comb = `ALU_MULHU;
+                        3'b100: alu_op_comb = `ALU_DIV;
+                        3'b101: alu_op_comb = `ALU_DIVU;
+                        3'b110: alu_op_comb = `ALU_REM;
+                        3'b111: alu_op_comb = `ALU_REMU;
+                        default: alu_op_comb = `ALU_ADD;
+                    endcase
+                end else
                 case ({f7[5], f3})
                     4'b0000: alu_op_comb = `ALU_ADD;
                     4'b1000: alu_op_comb = `ALU_SUB;

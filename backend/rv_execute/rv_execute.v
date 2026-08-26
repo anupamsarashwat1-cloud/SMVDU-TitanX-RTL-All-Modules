@@ -140,7 +140,33 @@ module rv_execute (
     end
 
     // -------------------------------------------------------
-    // M-Extension: 2-Cycle Pipelined Multiplier
+    // M-Extension multicycle engine (CPU-002/CPU-003 fix)
+    //
+    // Why the old scheme deadlocked: mul_div_stall = div_busy ||
+    // (is_mul && valid_in) feeds the GLOBAL stall (rv_core_top), which
+    // comes back into this module as `stall` — so decode froze holding
+    // the SAME mul presented, valid_in never dropped, and the stall
+    // held forever. Even one release cycle would have latched the
+    // PREVIOUS product (stage-1 regs updated on the same edge).
+    //
+    // This scheme, contract by contract:
+    //  - rv_core_top feeds us stall_ex (mem_stall||halt) WITHOUT our own
+    //    mul_div_stall, so starting is decidable from stable inputs.
+    //  - Operands and control are CAPTURED on the start edge; the engine
+    //    runs to completion off the captured copies (immune to whatever
+    //    sits frozen at the inputs while decode is stalled).
+    //  - On completion the result lands in the EX->MEM registers via the
+    //    mx_done branches below, and mx_fin latches for ONE drain cycle:
+    //    decode is still presenting the finished M-op that cycle (it was
+    //    stalled throughout), so mul_div_stall must DROP (letting decode
+    //    advance) while the EX->MEM normal path stays suppressed — else
+    //    the same instruction would restart or double-deliver.
+    //  - Completion is serialized against a load/store on the bus
+    //    (!stall in mx_done / MX_MUL exit / MX_DIV stepping): delivering
+    //    into EX->MEM while rv_mem owns that beat for a load would
+    //    clobber the load address.
+    //  - A flush aborts a busy op. Division specials (x/0, signed
+    //    overflow) bypass the 64-cycle loop entirely.
     // -------------------------------------------------------
     wire is_mul = (alu_op == `ALU_MUL)  || (alu_op == `ALU_MULH) ||
                   (alu_op == `ALU_MULHSU)|| (alu_op == `ALU_MULHU);
@@ -148,120 +174,179 @@ module rv_execute (
                   (alu_op == `ALU_REM)  || (alu_op == `ALU_REMU);
     wire is_mext = is_mul || is_div;
 
-    // Multiplier: 2-stage pipeline (Stage 1: booth encode, Stage 2: accumulate)
-    // 128-bit product for MULH variants
-    reg [127:0] mul_stage1_product;
-    reg [4:0]   mul_stage1_op;
-    reg         mul_stage1_valid;
-    reg [63:0]  mul_result;
+    localparam MX_IDLE = 2'd0, MX_MUL = 2'd1, MX_DIV = 2'd2;
+    reg [1:0]  mx_state;
+    reg [63:0] mx_a, mx_b;
+    reg [6:0]  mx_opcode_q;
+    reg [4:0]  mx_aluop_q, mx_rd_q;
+    reg [2:0]  mx_f3_q;
+    reg        mx_rw_q, mx_v_q;
+    reg        mx_fin;      // finished op still presented; drain-cycle latch
+
+    // NOTE: `stall` here is stall_ex (memory/halt only) — see header note.
+    wire mx_raw_start = is_mext && valid_in && !stall && !flush && !mx_fin &&
+                        (mx_state == MX_IDLE);
+    assign mul_div_stall = (mx_state != MX_IDLE) || mx_raw_start;
+
+    // Result-ready / result-delivered-this-edge qualifiers.
+    wire mx_ready = (mx_state == MX_MUL) || d_special || d_last;
+    wire mx_done  = mx_ready && !stall;
+
+    // ---- start-edge operand prep ----
+    // W forms operate on the SIGN-EXTENDED low words (captured below), so
+    // e.g. DIVW sees exactly the word semantics. Overflow detection is
+    // width-aware: sext32(INT32_MIN) is 64'hFFFF_FFFF_8000_0000, NOT the
+    // 64-bit INT64_MIN pattern — a naive combined detector would also
+    // swallow the legal 64-bit (-2^31)/(-1) = +2^31 and return garbage.
+    wire        mxw       = (opcode == `OP_REG64);
+    wire [63:0] eff_a     = mxw ? {{32{src1[31]}}, src1[31:0]} : src1;
+    wire [63:0] eff_b     = mxw ? {{32{src2[31]}}, src2[31:0]} : src2;
+    wire        signed_op = (alu_op == `ALU_DIV) || (alu_op == `ALU_REM);
+    wire        a_neg     = eff_a[63];
+    wire        b_zero    = (eff_b == 64'h0);
+    wire        b_m1      = (eff_b == 64'hFFFF_FFFF_FFFF_FFFF);
+    wire        ovf       = signed_op && !b_zero && b_m1 &&
+                            (mxw ? (eff_a[31:0] == 32'h8000_0000)
+                                 : (eff_a == 64'h8000_0000_0000_0000));
+
+    // ---- divider working regs (restoring radix-2 over |a|,|b|) ----
+    reg [63:0] d_rem, d_quot, d_x, d_y;
+    reg [5:0]  d_cnt;
+    reg        d_special, d_last, d_neg_q, d_neg_r;
+    reg [63:0] d_result_q;
+
+    wire [63:0] d_next_rem = {d_rem[62:0], d_x[63]};
+    wire        d_sub      = d_next_rem >= d_y;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            mul_stage1_product <= 128'h0;
-            mul_stage1_op      <= 5'h0;
-            mul_stage1_valid   <= 1'b0;
-        end else if (is_mul && valid_in && !stall) begin
-            // Stage 1: compute 128-bit product
-            case (alu_op)
-                `ALU_MUL,
-                `ALU_MULH:   mul_stage1_product <= $signed(src1) * $signed(src2);
-                `ALU_MULHSU: mul_stage1_product <= $signed(src1) * $unsigned(src2);
-                `ALU_MULHU:  mul_stage1_product <= src1 * src2;
-                default:     mul_stage1_product <= 128'h0;
-            endcase
-            mul_stage1_op    <= alu_op;
-            mul_stage1_valid <= 1'b1;
+            mx_state <= MX_IDLE;
+            mx_a <= 64'h0;  mx_b <= 64'h0;
+            mx_opcode_q <= 7'h0; mx_aluop_q <= 5'h0; mx_rd_q <= 5'h0;
+            mx_f3_q <= 3'h0; mx_rw_q <= 1'b0; mx_v_q <= 1'b0;
+            mx_fin <= 1'b0;
+            d_rem <= 64'h0; d_quot <= 64'h0; d_x <= 64'h0; d_y <= 64'h0;
+            d_cnt <= 6'd0; d_special <= 1'b0; d_last <= 1'b0;
+            d_neg_q <= 1'b0; d_neg_r <= 1'b0; d_result_q <= 64'h0;
+        end else if (flush) begin
+            mx_state   <= MX_IDLE;
+            d_special  <= 1'b0;
+            d_last     <= 1'b0;
+            mx_fin     <= 1'b0;
         end else begin
-            mul_stage1_valid <= 1'b0;
+            // One-shot: raise on the delivery edge, drop on the drain
+            // advance. Mutually exclusive conditions (mx_done implies
+            // mul_div_stall; the clear implies its absence).
+            if (mx_done)                              mx_fin <= 1'b1;
+            else if (!stall && !mul_div_stall)        mx_fin <= 1'b0;
+
+            case (mx_state)
+              MX_IDLE: if (mx_raw_start) begin
+                  // W forms capture the sign-extended words, not the raw
+                  // 64-bit registers: word divide/rem are NOT modular,
+                  // unlike MULW whose low word survives full-width math.
+                  mx_a <= eff_a;  mx_b <= eff_b;
+                  mx_opcode_q <= opcode;  mx_aluop_q <= alu_op;
+                  mx_rd_q <= rd_in;  mx_f3_q <= funct3;
+                  mx_rw_q <= reg_write;  mx_v_q <= valid_in;
+                  if (is_div) begin
+                      d_cnt     <= 6'd0;
+                      d_special <= b_zero || ovf;
+                      d_last    <= 1'b0;
+                      d_neg_q   <= signed_op && !b_zero && (a_neg != eff_b[63]);
+                      d_neg_r   <= (alu_op == `ALU_REM) && a_neg && !b_zero;
+                      if (b_zero) begin
+                          // DIV/DIVW -> -1 ; DIVU/DIVUW -> 2^N-1 ;
+                          // REM/REMU (and W twins) -> dividend (sign
+                          // included, not abs). BOTH remainder ops must
+                          // take this arm — testing ALU_REM alone made
+                          // REMU x/0 return the all-ones quotient.
+                          d_result_q <= ((alu_op == `ALU_REM) ||
+                                         (alu_op == `ALU_REMU))
+                                        ? eff_a : 64'hFFFF_FFFF_FFFF_FFFF;
+                      end else if (ovf) begin
+                          // INT_MIN / -1 -> INT_MIN ; INT_MIN % -1 -> 0
+                          d_result_q <= (alu_op == `ALU_REM)
+                                        ? 64'h0 : eff_a;
+                      end else begin
+                          d_x <= (signed_op && a_neg) ? (~eff_a + 64'd1) : eff_a;
+                          d_y <= (signed_op && eff_b[63]) ? (~eff_b + 64'd1) : eff_b;
+                          d_rem  <= 64'h0;
+                          d_quot <= 64'h0;
+                      end
+                      mx_state <= MX_DIV;
+                  end else
+                      mx_state <= MX_MUL;
+              end
+              // Hold until the delivery edge: exiting early (e.g. under a
+              // simultaneous mem_stall) would lose the result.
+              MX_MUL: if (mx_done) mx_state <= MX_IDLE;
+              MX_DIV: if (!stall) begin
+                  if (d_special || d_last) begin
+                      d_special <= 1'b0;
+                      d_last    <= 1'b0;
+                      mx_state  <= MX_IDLE;
+                  end else begin
+                      d_x <= {d_x[62:0], 1'b0};
+                      if (d_sub) begin
+                          d_rem  <= d_next_rem - d_y;
+                          d_quot <= {d_quot[62:0], 1'b1};
+                      end else begin
+                          d_rem  <= d_next_rem;
+                          d_quot <= {d_quot[62:0], 1'b0};
+                      end
+                      if (d_cnt == 6'd63) d_last <= 1'b1;
+                      else                d_cnt  <= d_cnt + 6'd1;
+                  end
+              end
+              default: mx_state <= MX_IDLE;
+            endcase
         end
     end
 
+    // ---- multiplier datapath (comb over captured operands) ----
+    wire signed [127:0] prod_ss = $signed(mx_a) * $signed(mx_b);
+    wire        [127:0] prod_su = $signed(mx_a) * $signed({1'b0, mx_b});
+    wire        [127:0] prod_uu = mx_a * mx_b;
+    reg         [63:0]  mul_r;
     always @(*) begin
-        case (mul_stage1_op)
-            `ALU_MUL:    mul_result = mul_stage1_product[63:0];
-            `ALU_MULH,
-            `ALU_MULHSU,
-            `ALU_MULHU:  mul_result = mul_stage1_product[127:64];
-            default:     mul_result = mul_stage1_product[63:0];
+        case (mx_aluop_q)
+            `ALU_MUL:    mul_r = prod_ss[63:0];
+            `ALU_MULH:   mul_r = prod_ss[127:64];
+            `ALU_MULHSU: mul_r = prod_su[127:64];
+            `ALU_MULHU:  mul_r = prod_uu[127:64];
+            default:     mul_r = prod_ss[63:0];
         endcase
     end
 
-    // Divider: non-restoring radix-2, 64-cycle maximum
-    reg [63:0]  div_dividend, div_divisor;
-    reg [63:0]  div_quotient, div_remainder;
-    reg [5:0]   div_cycle;
-    reg         div_busy, div_signed;
-    reg         div_is_rem;
-    reg         div_neg_q, div_neg_r;
-    reg [63:0]  div_result;
-    reg         div_done;
-
-    // Absolute values for signed division
-    wire [63:0] src1_abs = ($signed(src1) < 0) ? (~src1 + 64'd1) : src1;
-    wire [63:0] src2_abs = ($signed(src2) < 0) ? (~src2 + 64'd1) : src2;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            div_busy      <= 1'b0;
-            div_cycle     <= 6'd0;
-            div_quotient  <= 64'h0;
-            div_remainder <= 64'h0;
-            div_done      <= 1'b0;
-        end else begin
-            div_done <= 1'b0;
-            if (is_div && valid_in && !stall && !div_busy) begin
-                // Start division
-                div_dividend  <= (alu_op == `ALU_DIV || alu_op == `ALU_REM) ? src1_abs : src1;
-                div_divisor   <= (alu_op == `ALU_DIV || alu_op == `ALU_REM) ? src2_abs : src2;
-                div_quotient  <= 64'h0;
-                div_remainder <= 64'h0;
-                div_cycle     <= 6'd0;
-                div_busy      <= 1'b1;
-                div_signed    <= (alu_op == `ALU_DIV || alu_op == `ALU_REM);
-                div_is_rem    <= (alu_op == `ALU_REM || alu_op == `ALU_REMU);
-                div_neg_q     <= ((alu_op == `ALU_DIV) &&
-                                  ($signed(src1) < 0) ^ ($signed(src2) < 0) &&
-                                  (src2 != 64'h0));
-                div_neg_r     <= ((alu_op == `ALU_REM) && ($signed(src1) < 0));
-            end else if (div_busy) begin
-                // Non-restoring shift-subtract
-                if (div_cycle < 6'd63) begin
-                    div_cycle <= div_cycle + 6'd1;
-                    // Shift left: {remainder, quotient} << 1
-                    div_remainder <= {div_remainder[62:0], div_dividend[63]};
-                    div_dividend  <= {div_dividend[62:0], 1'b0};
-                    if ({div_remainder[62:0], div_dividend[63]} >= div_divisor) begin
-                        div_remainder <= {div_remainder[62:0], div_dividend[63]} - div_divisor;
-                        div_quotient  <= {div_quotient[62:0], 1'b1};
-                    end else begin
-                        div_quotient  <= {div_quotient[62:0], 1'b0};
-                    end
-                end else begin
-                    div_busy <= 1'b0;
-                    div_done <= 1'b1;
-                    // Handle division by zero
-                    if (div_divisor == 64'h0) begin
-                        div_quotient  <= 64'hFFFF_FFFF_FFFF_FFFF;
-                        div_remainder <= div_dividend;
-                    end
-                end
-            end
-        end
-    end
-
+    // ---- divider final fixups ----
+    // q = |a|//|b| sign-corrected (trunc toward zero), r = a - q*b takes
+    // the dividend's sign — RISC-V semantics, matches the golden model.
+    wire [63:0] quot_raw = d_neg_q ? (~d_quot + 64'd1) : d_quot;
+    wire [63:0] rem_raw  = d_neg_r ? (~d_rem  + 64'd1) : d_rem;
+    reg  [63:0] div_r;
     always @(*) begin
-        if (div_is_rem) begin
-            div_result = div_neg_r ? (~div_remainder + 64'd1) : div_remainder;
-        end else begin
-            div_result = div_neg_q ? (~div_quotient + 64'd1) : div_quotient;
-        end
+        case (mx_aluop_q)
+            `ALU_DIV:    div_r = quot_raw;
+            `ALU_DIVU:   div_r = d_quot;
+            `ALU_REM:    div_r = rem_raw;
+            default:     div_r = d_rem;          // REMU
+        endcase
     end
 
-    // MUL/DIV stall: assert while divider is running or mul pipeline pending
-    assign mul_div_stall = div_busy || (is_mul && valid_in);
+    // W-form results narrow to sext32 of the computed word.
+    wire        mxw_q    = (mx_opcode_q == `OP_REG64);
+    wire [63:0] mext_final =
+        mx_ready
+            ? ((mx_state == MX_MUL)
+                  ? (mxw_q ? {{32{prod_ss[31]}}, prod_ss[31:0]} : mul_r)
+               : d_special
+                  ? (mxw_q ? {{32{d_result_q[31]}}, d_result_q[31:0]}
+                           : d_result_q)
+                  : (mxw_q ? {{32{div_r[31]}}, div_r[31:0]} : div_r))
+            : 64'h0;
 
-    // Final M-ext result mux
-    wire [63:0] mext_result = is_div ? div_result : mul_result;
+    wire [63:0] mext_result = mext_final;
 
     // -------------------------------------------------------
     // A-Extension: LR/SC Reservation
@@ -337,8 +422,10 @@ module rv_execute (
             alu_result    <= 64'h0;
         end else if (flush_ex_1) begin
             alu_result    <= 64'h0;
-        end else if (!stall && !mul_div_stall) begin
+        end else if (!stall && !mul_div_stall && !mx_fin) begin
             alu_result    <= final_alu_res;
+        end else if (mx_done) begin
+            alu_result    <= mext_result;
         end
     end
 
@@ -348,7 +435,7 @@ module rv_execute (
             rs2_out       <= 64'h0;
         end else if (flush_ex_2) begin
             rs2_out       <= 64'h0;
-        end else if (!stall && !mul_div_stall) begin
+        end else if (!stall && !mul_div_stall && !mx_fin) begin
             rs2_out       <= src2_reg;
         end
     end
@@ -359,7 +446,7 @@ module rv_execute (
             branch_target <= 64'h0;
         end else if (flush_ex_3) begin
             branch_target <= 64'h0;
-        end else if (!stall && !mul_div_stall) begin
+        end else if (!stall && !mul_div_stall && !mx_fin) begin
             branch_target <= branch_tgt;
         end
     end
@@ -388,7 +475,7 @@ module rv_execute (
             amo_funct5_out<= 5'h0;
             valid_out     <= 1'b0;
             branch_taken  <= 1'b0;
-        end else if (!stall && !mul_div_stall) begin
+        end else if (!stall && !mul_div_stall && !mx_fin) begin
             rd_out        <= rd_in;
             funct3_out    <= funct3;
             opcode_out    <= opcode;
@@ -399,6 +486,21 @@ module rv_execute (
             amo_funct5_out<= amo_funct5;
             valid_out     <= valid_in;
             branch_taken  <= branch_comb && valid_in;
+        end else if (mx_done) begin
+            // M-ext delivery: replay the CAPTURED instruction's control
+            // fields — decode is frozen presenting this same op, so the
+            // live inputs would work too, but the captured copies are the
+            // contract (and immune to any same-edge weirdness).
+            rd_out        <= mx_rd_q;
+            funct3_out    <= mx_f3_q;
+            opcode_out    <= mx_opcode_q;
+            mem_read_out  <= 1'b0;
+            mem_write_out <= 1'b0;
+            reg_write_out <= mx_rw_q;
+            is_amo_out    <= 1'b0;
+            amo_funct5_out<= 5'h0;
+            valid_out     <= mx_v_q;
+            branch_taken  <= 1'b0;
         end
     end
 
