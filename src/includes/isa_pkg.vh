@@ -262,4 +262,5 @@
 `define MISA_S      26'h0040000  // Supervisor mode
 `define MISA_U      26'h0100000  // User mode
 
+`define NUM_HARTS   4            // Define NUM_HARTS for testbenches
 `endif // ISA_PKG_VH
