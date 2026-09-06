@@ -155,6 +155,29 @@ module rv_icache #(
         !plru[0] ? (!plru[1] ? (!plru[3] ? 3'd0 : 3'd1) : (!plru[4] ? 3'd2 : 3'd3)) :
                     (!plru[2] ? (!plru[5] ? 3'd4 : 3'd5) : (!plru[6] ? 3'd6 : 3'd7));
 
+
+    // Mark a way MRU in the 8-way PLRU tree (shared by hit path and
+    // install path — installs previously never updated the tree, so the
+    // victim pointer froze and one way was thrashed forever).
+    task plru_mru;
+        input [INDEX_W-1:0] ix;
+        input [2:0]         wy;
+        reg [6:0]           p;
+        begin
+            p = plru_state[ix];
+            case (wy)
+                3'd0: plru_state[ix] <= {p[6:4], 1'b0, 1'b0, 1'b0, 1'b1};
+                3'd1: plru_state[ix] <= {p[6:4], 1'b1, 1'b0, 1'b0, 1'b1};
+                3'd2: plru_state[ix] <= {p[6:5], 1'b0, p[3], 1'b1, 1'b1};
+                3'd3: plru_state[ix] <= {p[6:5], 1'b1, p[3], 1'b1, 1'b1};
+                3'd4: plru_state[ix] <= {p[6],   1'b0, p[4:3], p[2:1], 1'b1};
+                3'd5: plru_state[ix] <= {p[6],   1'b1, p[4:3], p[2:1], 1'b1};
+                3'd6: plru_state[ix] <= {1'b0,   p[5:3], p[2:1], 1'b1};
+                3'd7: plru_state[ix] <= {1'b1,   p[5:3], p[2:1], 1'b1};
+            endcase
+        end
+    endtask
+
     // -------------------------------------------------------
     // Refill FSM
     // -------------------------------------------------------
@@ -198,6 +221,7 @@ module rv_icache #(
                         if (cache_hit) begin
                             cpu_rdata <= instr_word;
                             cpu_valid <= 1'b1;
+                            plru_mru(index, hit_way_enc);
                             // Update PLRU on hit
                         end else begin
                             // Cache miss — start refill
@@ -232,11 +256,14 @@ module rv_icache #(
                         fill_beat <= fill_beat + 3'h1;
                         if (m_rlast) begin
                             m_rready <= 1'b0;
-                            // Install into cache SRAM
+                            // Install into cache SRAM (DC-004 fix, mirrors
+                            // dcache): fill_buf holds beats 0..6 in the LOW
+                            // slots; m_rdata IS beat 7 — top of the line.
                             data_sram[fill_idx][fill_way] <=
-                                {fill_buf[LINE_BITS-1:64], m_rdata};
+                                {m_rdata, fill_buf[LINE_BITS-65:0]};
                             tag_sram[fill_idx][fill_way] <=
                                 {1'b1, compute_ecc(fill_tag), fill_tag};
+                            plru_mru(fill_idx, fill_way);   // DC-005 mirror
                             // Invalidate all other ways with same tag (VIPT alias avoidance)
                             // PLRU: mark filled way as MRU
                             state <= IDLE;
@@ -247,20 +274,6 @@ module rv_icache #(
                 default: state <= IDLE;
             endcase
 
-            // PLRU update on hit
-            if (cpu_req && cache_hit) begin
-                // Update PLRU to reflect hit_way_enc as MRU
-                case (hit_way_enc)
-                    3'd0: plru_state[index] <= {plru[6:4], 1'b0, 1'b0, 1'b0, plru[0]};
-                    3'd1: plru_state[index] <= {plru[6:4], 1'b1, 1'b0, 1'b0, plru[0]};
-                    3'd2: plru_state[index] <= {plru[6:5], 1'b0, plru[3], 1'b1, plru[0]};
-                    3'd3: plru_state[index] <= {plru[6:5], 1'b1, plru[3], 1'b1, plru[0]};
-                    3'd4: plru_state[index] <= {plru[6], 1'b0, plru[4:3], plru[2:1], 1'b1};
-                    3'd5: plru_state[index] <= {plru[6], 1'b1, plru[4:3], plru[2:1], 1'b1};
-                    3'd6: plru_state[index] <= {1'b0, plru[5:3], plru[2:1], 1'b1};
-                    3'd7: plru_state[index] <= {1'b1, plru[5:3], plru[2:1], 1'b1};
-                endcase
-            end
         end
     end
 

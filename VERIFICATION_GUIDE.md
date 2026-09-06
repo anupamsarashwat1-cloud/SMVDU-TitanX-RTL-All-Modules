@@ -76,7 +76,7 @@ These modules have **no dependencies on other custom modules**. Each can be comp
 cd common/cdc_sync
 iverilog -g2012 -o sim.vvp tb_cdc_sync.v cdc_sync.v
 vvp sim.vvp
-gtkwave tb_cdc_sync.vcd &
+gtkwave tb_cdc_sync.vcd tb_cdc_sync.gtkw &
 ```
 **Key signals to inspect:** `din`, `dout`, `clk_a`, `clk_b` — verify 2-FF synchronization latency
 
@@ -85,7 +85,7 @@ gtkwave tb_cdc_sync.vcd &
 cd common/fifo_sync
 iverilog -g2012 -o sim.vvp tb_fifo_sync.v fifo_sync.v
 vvp sim.vvp
-gtkwave tb_fifo_sync.vcd &
+gtkwave tb_fifo_sync.vcd tb_fifo_sync.gtkw &
 ```
 **Key signals:** `wr_en`, `rd_en`, `full`, `empty`, `data_in`, `data_out`
 
@@ -94,7 +94,7 @@ gtkwave tb_fifo_sync.vcd &
 cd common/fifo_async
 iverilog -g2012 -o sim.vvp tb_fifo_async.v fifo_async.v
 vvp sim.vvp
-gtkwave tb_fifo_async.vcd &
+gtkwave tb_fifo_async.vcd tb_fifo_async.gtkw &
 ```
 **Key signals:** `wr_clk`, `rd_clk`, `full`, `empty` — verify gray-code pointer crossing
 
@@ -103,7 +103,7 @@ gtkwave tb_fifo_async.vcd &
 cd common/reset_sync
 iverilog -g2012 -o sim.vvp tb_reset_sync.v reset_sync.v
 vvp sim.vvp
-gtkwave tb_reset_sync.vcd &
+gtkwave tb_reset_sync.vcd tb_reset_sync.gtkw &
 ```
 **Key signals:** `rst_in`, `rst_out`, `clk` — verify de-assertion is synchronous
 
@@ -124,7 +124,7 @@ vvp sim.vvp
 cd backend/rv_regfile
 iverilog -g2012 -o sim.vvp tb_rv_regfile.v rv_regfile.v
 vvp sim.vvp
-gtkwave tb_rv_regfile.vcd &
+gtkwave tb_rv_regfile.vcd tb_rv_regfile.gtkw &
 ```
 **Key signals:** `rs1_addr`, `rs1_data`, `rs2_addr`, `rs2_data`, `rd_addr`, `rd_data`, `rd_wen` — verify x0 is always zero, write-then-read returns correct value
 
@@ -133,7 +133,7 @@ gtkwave tb_rv_regfile.vcd &
 cd backend/rv_csr
 iverilog -g2012 -o sim.vvp -I ../../includes tb_rv_csr.v rv_csr.v ../../includes/stdcell_stubs.v
 vvp sim.vvp
-gtkwave tb_rv_csr.vcd &
+gtkwave tb_rv_csr.vcd tb_rv_csr.gtkw &
 ```
 **Key signals:** `csr_addr`, `csr_wdata`, `csr_rdata`, `priv_mode`, `mstatus`, `mepc`, `mcause` — verify privilege mode transitions and trap vector
 
@@ -142,7 +142,7 @@ gtkwave tb_rv_csr.vcd &
 cd backend/rv_execute
 iverilog -g2012 -o sim.vvp -I ../../includes tb_rv_execute.v rv_execute.v ../../includes/stdcell_stubs.v
 vvp sim.vvp
-gtkwave tb_rv_execute.vcd &
+gtkwave tb_rv_execute.vcd tb_rv_execute.gtkw &
 ```
 **Key signals:** `alu_result`, `alu_op`, `operand_a`, `operand_b`, `branch_taken`, `branch_target` — verify ADD/SUB/AND/OR/XOR/SLT/shifts and branch conditions
 
@@ -151,7 +151,7 @@ gtkwave tb_rv_execute.vcd &
 cd backend/rv_fpu
 iverilog -g2012 -o sim.vvp tb_rv_fpu.v rv_fpu.v
 vvp sim.vvp
-gtkwave tb_rv_fpu.vcd &
+gtkwave tb_rv_fpu.vcd tb_rv_fpu.gtkw &
 ```
 **Key signals:** `fp_operand_a`, `fp_operand_b`, `fp_result`, `fp_op`, `fflags` — verify FADD, FMUL, FDIV, FSQRT, FCVT, exception flags (NV, DZ, OF, UF, NX)
 
@@ -160,7 +160,7 @@ gtkwave tb_rv_fpu.vcd &
 cd backend/rv_mem
 iverilog -g2012 -o sim.vvp tb_rv_mem.v rv_mem.v
 vvp sim.vvp
-gtkwave tb_rv_mem.vcd &
+gtkwave tb_rv_mem.vcd tb_rv_mem.gtkw &
 ```
 **Key signals:** `mem_addr`, `mem_wdata`, `mem_rdata`, `mem_wen`, `mem_size`, `stall_req`
 
@@ -169,7 +169,7 @@ gtkwave tb_rv_mem.vcd &
 cd backend/rv_writeback
 iverilog -g2012 -o sim.vvp tb_rv_writeback.v rv_writeback.v
 vvp sim.vvp
-gtkwave tb_rv_writeback.vcd &
+gtkwave tb_rv_writeback.vcd tb_rv_writeback.gtkw &
 ```
 **Key signals:** `rd_idx`, `rd_data`, `rd_wen`, `wb_sel` — verify ALU result vs memory load selection
 
@@ -178,7 +178,7 @@ gtkwave tb_rv_writeback.vcd &
 cd frontend/rv_fetch
 iverilog -g2012 -o sim.vvp tb_rv_fetch.v rv_fetch.v
 vvp sim.vvp
-gtkwave tb_rv_fetch.vcd &
+gtkwave tb_rv_fetch.vcd tb_rv_fetch.gtkw &
 ```
 **Key signals:** `pc`, `pc_next`, `inst`, `inst_valid`, `flush`, `stall` — verify sequential PC increment, flush redirect, stall hold
 
@@ -187,7 +187,7 @@ gtkwave tb_rv_fetch.vcd &
 cd frontend/rv_decode
 iverilog -g2012 -o sim.vvp tb_rv_decode.v rv_decode.v
 vvp sim.vvp
-gtkwave tb_rv_decode.vcd &
+gtkwave tb_rv_decode.vcd tb_rv_decode.gtkw &
 ```
 **Key signals:** `inst`, `rs1`, `rs2`, `rd`, `imm`, `alu_op`, `opcode` — verify R/I/S/B/U/J type decoding
 
@@ -196,7 +196,7 @@ gtkwave tb_rv_decode.vcd &
 cd frontend/rv_bpu
 iverilog -g2012 -o sim.vvp tb_rv_bpu.v rv_bpu.v
 vvp sim.vvp
-gtkwave tb_rv_bpu.vcd &
+gtkwave tb_rv_bpu.vcd tb_rv_bpu.gtkw &
 ```
 **Key signals:** `pc`, `predict_taken`, `predict_target`, `update_valid`, `update_taken`, `btb_hit` — verify BTB hit/miss and BHT saturation counter
 
@@ -205,7 +205,7 @@ gtkwave tb_rv_bpu.vcd &
 cd frontend/rv_icache
 iverilog -g2012 -o sim.vvp tb_rv_icache.v rv_icache.v
 vvp sim.vvp
-gtkwave tb_rv_icache.vcd &
+gtkwave tb_rv_icache.vcd tb_rv_icache.gtkw &
 ```
 **Key signals:** `addr`, `hit`, `miss`, `data_out`, `refill_valid`, `tag_match` — verify cache hit/miss behavior
 
@@ -214,7 +214,7 @@ gtkwave tb_rv_icache.vcd &
 cd backend/rv_dcache
 iverilog -g2012 -o sim.vvp tb_rv_dcache.v rv_dcache.v
 vvp sim.vvp
-gtkwave tb_rv_dcache.vcd &
+gtkwave tb_rv_dcache.vcd tb_rv_dcache.gtkw &
 ```
 **Key signals:** `addr`, `hit`, `dirty`, `writeback`, `data_out`, `data_in` — verify write-back policy and dirty eviction
 
@@ -223,7 +223,7 @@ gtkwave tb_rv_dcache.vcd &
 cd backend/rv_tlb
 iverilog -g2012 -o sim.vvp tb_rv_tlb.v rv_tlb.v
 vvp sim.vvp
-gtkwave tb_rv_tlb.vcd &
+gtkwave tb_rv_tlb.vcd tb_rv_tlb.gtkw &
 ```
 **Key signals:** `vpn`, `ppn`, `hit`, `miss`, `flush`, `asid` — verify virtual-to-physical translation lookup
 
@@ -232,7 +232,7 @@ gtkwave tb_rv_tlb.vcd &
 cd backend/rv_ptw
 iverilog -g2012 -o sim.vvp tb_rv_ptw.v rv_ptw.v
 vvp sim.vvp
-gtkwave tb_rv_ptw.vcd &
+gtkwave tb_rv_ptw.vcd tb_rv_ptw.gtkw &
 ```
 **Key signals:** `ptw_req`, `ptw_vpn`, `ptw_pte`, `ptw_done`, `ptw_level`, `page_fault` — verify 3-level Sv39 walk (VPN[2] → VPN[1] → VPN[0])
 
@@ -241,7 +241,7 @@ gtkwave tb_rv_ptw.vcd &
 cd backend/rv_mmu
 iverilog -g2012 -o sim.vvp tb_rv_mmu.v rv_mmu.v
 vvp sim.vvp
-gtkwave tb_rv_mmu.vcd &
+gtkwave tb_rv_mmu.vcd tb_rv_mmu.gtkw &
 ```
 **Key signals:** `satp`, `priv_mode`, `va_in`, `pa_out`, `page_fault`, `access_fault` — verify Sv39 enable/disable, bare mode bypass
 
@@ -250,7 +250,7 @@ gtkwave tb_rv_mmu.vcd &
 cd backend/rv_pmp
 iverilog -g2012 -o sim.vvp tb_rv_pmp.v rv_pmp.v
 vvp sim.vvp
-gtkwave tb_rv_pmp.vcd &
+gtkwave tb_rv_pmp.vcd tb_rv_pmp.gtkw &
 ```
 **Key signals:** `pmpcfg`, `pmpaddr`, `check_addr`, `check_type`, `allow`, `deny` — verify TOR/NAPOT/NA4 region matching
 
@@ -259,7 +259,7 @@ gtkwave tb_rv_pmp.vcd &
 cd backend/rv_debug
 iverilog -g2012 -o sim.vvp tb_rv_debug.v rv_debug.v
 vvp sim.vvp
-gtkwave tb_rv_debug.vcd &
+gtkwave tb_rv_debug.vcd tb_rv_debug.gtkw &
 ```
 **Key signals:** `halt_req`, `resume_req`, `halted`, `running`, `dpc` — verify halt/resume handshake
 
@@ -268,7 +268,7 @@ gtkwave tb_rv_debug.vcd &
 cd backend/clint
 iverilog -g2012 -o sim.vvp tb_clint.v clint.v
 vvp sim.vvp
-gtkwave tb_clint.vcd &
+gtkwave tb_clint.vcd tb_clint.gtkw &
 ```
 **Key signals:** `mtime`, `mtimecmp`, `timer_irq`, `sw_irq` — verify `mtime >= mtimecmp` triggers timer_irq
 
@@ -277,7 +277,7 @@ gtkwave tb_clint.vcd &
 cd backend/plic
 iverilog -g2012 -o sim.vvp tb_plic.v plic.v
 vvp sim.vvp
-gtkwave tb_plic.vcd &
+gtkwave tb_plic.vcd tb_plic.gtkw &
 ```
 **Key signals:** `irq_sources`, `priority`, `threshold`, `claim`, `complete`, `ext_irq` — verify priority-based arbitration
 
@@ -286,7 +286,7 @@ gtkwave tb_plic.vcd &
 cd backend/rv_monitor_core
 iverilog -g2012 -o sim.vvp tb_rv_monitor_core.v rv_monitor_core.v
 vvp sim.vvp
-gtkwave tb_rv_monitor_core.vcd &
+gtkwave tb_rv_monitor_core.vcd tb_rv_monitor_core.gtkw &
 ```
 **Key signals:** `pc`, `inst`, `mon_active` — verify basic RV64IMAC instruction execution
 
@@ -299,7 +299,7 @@ gtkwave tb_rv_monitor_core.vcd &
 cd memory/sram_32x64_180nm
 iverilog -g2012 -o sim.vvp tb_sram_32x64_180nm.v sram_32x64_180nm.v
 vvp sim.vvp
-gtkwave tb_sram_32x64_180nm.vcd &
+gtkwave tb_sram_32x64_180nm.vcd tb_sram_32x64_180nm.gtkw &
 ```
 **Key signals:** `addr`, `din`, `dout`, `wen`, `cen` — verify write-then-read data integrity
 
@@ -308,7 +308,7 @@ gtkwave tb_sram_32x64_180nm.vcd &
 cd memory/sram_512kx8_180nm
 iverilog -g2012 -o sim.vvp tb_sram_512kx8_180nm.v sram_512kx8_180nm.v
 vvp sim.vvp
-gtkwave tb_sram_512kx8_180nm.vcd &
+gtkwave tb_sram_512kx8_180nm.vcd tb_sram_512kx8_180nm.gtkw &
 ```
 **Key signals:** Same as above but for the larger macro
 
@@ -317,7 +317,7 @@ gtkwave tb_sram_512kx8_180nm.vcd &
 cd memory/l2_cache_ctrl
 iverilog -g2012 -o sim.vvp tb_l2_cache_ctrl.v l2_cache_ctrl.v
 vvp sim.vvp
-gtkwave tb_l2_cache_ctrl.vcd &
+gtkwave tb_l2_cache_ctrl.vcd tb_l2_cache_ctrl.gtkw &
 ```
 **Key signals:** `state`, `hit`, `miss`, `evict`, `writeback` — verify FSM transitions
 
@@ -326,7 +326,7 @@ gtkwave tb_l2_cache_ctrl.vcd &
 cd memory/l2_tag_array
 iverilog -g2012 -o sim.vvp tb_l2_tag_array.v l2_tag_array.v
 vvp sim.vvp
-gtkwave tb_l2_tag_array.vcd &
+gtkwave tb_l2_tag_array.vcd tb_l2_tag_array.gtkw &
 ```
 **Key signals:** `tag_in`, `tag_out`, `valid`, `dirty`, `way_sel` — verify tag match logic
 
@@ -335,7 +335,7 @@ gtkwave tb_l2_tag_array.vcd &
 cd memory/l2_data_array
 iverilog -g2012 -o sim.vvp tb_l2_data_array.v l2_data_array.v
 vvp sim.vvp
-gtkwave tb_l2_data_array.vcd &
+gtkwave tb_l2_data_array.vcd tb_l2_data_array.gtkw &
 ```
 **Key signals:** `data_in`, `data_out`, `addr`, `wen` — verify read/write data paths
 
@@ -344,7 +344,7 @@ gtkwave tb_l2_data_array.vcd &
 cd memory/l2_snoop_filter
 iverilog -g2012 -o sim.vvp tb_l2_snoop_filter.v l2_snoop_filter.v
 vvp sim.vvp
-gtkwave tb_l2_snoop_filter.vcd &
+gtkwave tb_l2_snoop_filter.vcd tb_l2_snoop_filter.gtkw &
 ```
 **Key signals:** `snoop_addr`, `snoop_hit`, `invalidate`, `state` (MESI) — verify coherence tracking
 
@@ -353,7 +353,7 @@ gtkwave tb_l2_snoop_filter.vcd &
 cd memory/ddr_phy_if
 iverilog -g2012 -o sim.vvp tb_ddr_phy_if.v ddr_phy_if.v
 vvp sim.vvp
-gtkwave tb_ddr_phy_if.vcd &
+gtkwave tb_ddr_phy_if.vcd tb_ddr_phy_if.gtkw &
 ```
 **Key signals:** `ddr_ck_p/n`, `ddr_cke`, `ddr_cs_n`, `ddr_dq`, `ddr_dqs_p/n` — verify DDR4 timing
 
@@ -362,7 +362,7 @@ gtkwave tb_ddr_phy_if.vcd &
 cd memory/ddr_scheduler
 iverilog -g2012 -o sim.vvp tb_ddr_scheduler.v ddr_scheduler.v
 vvp sim.vvp
-gtkwave tb_ddr_scheduler.vcd &
+gtkwave tb_ddr_scheduler.vcd tb_ddr_scheduler.gtkw &
 ```
 **Key signals:** `cmd_valid`, `cmd_type` (ACT/RD/WR/PRE), `bank`, `row`, `col`, `ready` — verify open-page/close-page scheduling
 
@@ -375,7 +375,7 @@ gtkwave tb_ddr_scheduler.vcd &
 cd interconnect/axi4_to_ahb
 iverilog -g2012 -o sim.vvp tb_axi4_to_ahb.v axi4_to_ahb.v
 vvp sim.vvp
-gtkwave tb_axi4_to_ahb.vcd &
+gtkwave tb_axi4_to_ahb.vcd tb_axi4_to_ahb.gtkw &
 ```
 **Key signals:** `axi_arvalid/arready`, `ahb_htrans`, `ahb_hwrite`, `ahb_haddr` — verify protocol translation
 
@@ -384,7 +384,7 @@ gtkwave tb_axi4_to_ahb.vcd &
 cd interconnect/ahb_to_apb
 iverilog -g2012 -o sim.vvp tb_ahb_to_apb.v ahb_to_apb.v
 vvp sim.vvp
-gtkwave tb_ahb_to_apb.vcd &
+gtkwave tb_ahb_to_apb.vcd tb_ahb_to_apb.gtkw &
 ```
 **Key signals:** `ahb_htrans`, `apb_psel`, `apb_penable`, `apb_pwrite` — verify NONSEQ → psel/penable sequence
 
@@ -393,7 +393,7 @@ gtkwave tb_ahb_to_apb.vcd &
 cd interconnect/apb_bridge
 iverilog -g2012 -o sim.vvp tb_apb_bridge.v apb_bridge.v
 vvp sim.vvp
-gtkwave tb_apb_bridge.vcd &
+gtkwave tb_apb_bridge.vcd tb_apb_bridge.gtkw &
 ```
 **Key signals:** `paddr`, `psel_0..psel_n`, `prdata`, `pwdata` — verify address decode to correct peripheral
 
@@ -402,7 +402,7 @@ gtkwave tb_apb_bridge.vcd &
 cd interconnect/axi4_crossbar
 iverilog -g2012 -o sim.vvp tb_axi4_crossbar.v axi4_crossbar.v
 vvp sim.vvp
-gtkwave tb_axi4_crossbar.vcd &
+gtkwave tb_axi4_crossbar.vcd tb_axi4_crossbar.gtkw &
 ```
 **Key signals:** `m0_awvalid/awready`, `s0_awvalid/awready`, `arb_grant` — verify routing M[i] → S[j]
 
@@ -411,7 +411,7 @@ gtkwave tb_axi4_crossbar.vcd &
 cd interconnect
 iverilog -g2012 -o sim.vvp tb_axi4_burst_to_lite.v axi4_burst_to_lite.v
 vvp sim.vvp
-gtkwave tb_axi4_burst_to_lite.vcd &
+gtkwave tb_axi4_burst_to_lite.vcd tb_axi4_burst_to_lite.gtkw &
 ```
 **Key signals:** `arlen`, `arsize`, `lite_arvalid` — verify burst decomposition
 
@@ -420,7 +420,7 @@ gtkwave tb_axi4_burst_to_lite.vcd &
 cd interconnect/qos_controller
 iverilog -g2012 -o sim.vvp tb_qos_controller.v qos_controller.v
 vvp sim.vvp
-gtkwave tb_qos_controller.vcd &
+gtkwave tb_qos_controller.vcd tb_qos_controller.gtkw &
 ```
 **Key signals:** `bandwidth`, `threshold`, `boost`, `throttle` — verify QoS policy enforcement
 
@@ -429,7 +429,7 @@ gtkwave tb_qos_controller.vcd &
 cd interconnect/interconnect_mpu
 iverilog -g2012 -o sim.vvp tb_interconnect_mpu.v mpu.v
 vvp sim.vvp
-gtkwave tb_interconnect_mpu.vcd &
+gtkwave tb_interconnect_mpu.vcd tb_interconnect_mpu.gtkw &
 ```
 **Key signals:** `region_base`, `region_limit`, `access_addr`, `access_type`, `grant/deny`
 
@@ -438,7 +438,7 @@ gtkwave tb_interconnect_mpu.vcd &
 cd interconnect/mmu_arbiter
 iverilog -g2012 -o sim.vvp tb_mmu_arbiter.v mmu_arbiter.v
 vvp sim.vvp
-gtkwave tb_mmu_arbiter.vcd &
+gtkwave tb_mmu_arbiter.vcd tb_mmu_arbiter.gtkw &
 ```
 **Key signals:** `req_0`, `req_1`, `grant_0`, `grant_1` — verify round-robin fairness
 
@@ -451,7 +451,7 @@ gtkwave tb_mmu_arbiter.vcd &
 cd peripherals/uart_16550
 iverilog -g2012 -o sim.vvp tb_uart_16550.v uart_16550.v
 vvp sim.vvp
-gtkwave tb_uart_16550.vcd &
+gtkwave tb_uart_16550.vcd tb_uart_16550.gtkw &
 ```
 **Key signals:** `uart_tx`, `uart_rx`, `baud_tick`, `thr`, `rbr`, `lsr` — verify TX start/stop/data bits, loopback mode
 
@@ -460,7 +460,7 @@ gtkwave tb_uart_16550.vcd &
 cd peripherals/can_controller
 iverilog -g2012 -o sim.vvp tb_can_controller.v can_controller.v
 vvp sim.vvp
-gtkwave tb_can_controller.vcd &
+gtkwave tb_can_controller.vcd tb_can_controller.gtkw &
 ```
 **Key signals:** `can_tx`, `can_rx`, `arb_field`, `data_field`, `crc` — verify CAN 2.0B frame format
 
@@ -469,7 +469,7 @@ gtkwave tb_can_controller.vcd &
 cd peripherals/i2c_master
 iverilog -g2012 -o sim.vvp tb_i2c_master.v i2c_master.v
 vvp sim.vvp
-gtkwave tb_i2c_master.vcd &
+gtkwave tb_i2c_master.vcd tb_i2c_master.gtkw &
 ```
 **Key signals:** `scl`, `sda`, `start`, `stop`, `ack` — verify START condition, 8-bit + ACK, STOP condition
 
@@ -478,7 +478,7 @@ gtkwave tb_i2c_master.vcd &
 cd peripherals/spi_master
 iverilog -g2012 -o sim.vvp tb_spi_master.v spi_master.v
 vvp sim.vvp
-gtkwave tb_spi_master.vcd &
+gtkwave tb_spi_master.vcd tb_spi_master.gtkw &
 ```
 **Key signals:** `sclk`, `mosi`, `miso`, `cs_n`, `cpol`, `cpha` — verify all 4 SPI modes
 
@@ -487,7 +487,7 @@ gtkwave tb_spi_master.vcd &
 cd peripherals/gpio_ctrl
 iverilog -g2012 -o sim.vvp tb_gpio_ctrl.v gpio_ctrl.v
 vvp sim.vvp
-gtkwave tb_gpio_ctrl.vcd &
+gtkwave tb_gpio_ctrl.vcd tb_gpio_ctrl.gtkw &
 ```
 **Key signals:** `gpio_dir`, `gpio_out`, `gpio_in`, `gpio_irq` — verify input/output/interrupt modes
 
@@ -496,7 +496,7 @@ gtkwave tb_gpio_ctrl.vcd &
 cd peripherals/rtc
 iverilog -g2012 -o sim.vvp tb_rtc.v rtc.v
 vvp sim.vvp
-gtkwave tb_rtc.vcd &
+gtkwave tb_rtc.vcd tb_rtc.gtkw &
 ```
 **Key signals:** `rtc_clk`, `counter`, `alarm`, `timer_irq` — verify counter increment and alarm match
 
@@ -505,7 +505,7 @@ gtkwave tb_rtc.vcd &
 cd peripherals/watchdog_timer
 iverilog -g2012 -o sim.vvp tb_watchdog_timer.v watchdog_timer.v
 vvp sim.vvp
-gtkwave tb_watchdog_timer.vcd &
+gtkwave tb_watchdog_timer.vcd tb_watchdog_timer.gtkw &
 ```
 **Key signals:** `load_val`, `counter`, `enable`, `wdt_reset` — verify timeout triggers reset
 
@@ -514,7 +514,7 @@ gtkwave tb_watchdog_timer.vcd &
 cd peripherals/trng
 iverilog -g2012 -o sim.vvp tb_trng.v trng.v
 vvp sim.vvp
-gtkwave tb_trng.vcd &
+gtkwave tb_trng.vcd tb_trng.gtkw &
 ```
 **Key signals:** `entropy_valid`, `random_data`, `health_check` — verify randomness source
 
@@ -523,7 +523,7 @@ gtkwave tb_trng.vcd &
 cd peripherals/aes_engine
 iverilog -g2012 -o sim.vvp tb_aes_engine.v aes_engine.v
 vvp sim.vvp
-gtkwave tb_aes_engine.vcd &
+gtkwave tb_aes_engine.vcd tb_aes_engine.gtkw &
 ```
 **Key signals:** `key`, `plaintext`, `ciphertext`, `start`, `done` — verify NIST test vectors
 
@@ -532,7 +532,7 @@ gtkwave tb_aes_engine.vcd &
 cd peripherals/sha256_engine
 iverilog -g2012 -o sim.vvp tb_sha256_engine.v sha256_engine.v
 vvp sim.vvp
-gtkwave tb_sha256_engine.vcd &
+gtkwave tb_sha256_engine.vcd tb_sha256_engine.gtkw &
 ```
 **Key signals:** `data_in`, `hash_out`, `start`, `done` — verify known-answer hash
 
@@ -541,7 +541,7 @@ gtkwave tb_sha256_engine.vcd &
 cd peripherals/gem_ethernet
 iverilog -g2012 -o sim.vvp tb_gem_ethernet.v gem_ethernet.v
 vvp sim.vvp
-gtkwave tb_gem_ethernet.vcd &
+gtkwave tb_gem_ethernet.vcd tb_gem_ethernet.gtkw &
 ```
 **Key signals:** `gmii_txd`, `gmii_rxd`, `tx_en`, `rx_dv`, `crc_valid` — verify frame TX/RX
 
@@ -550,7 +550,7 @@ gtkwave tb_gem_ethernet.vcd &
 cd peripherals/gem_sgmii_pcs
 iverilog -g2012 -o sim.vvp tb_gem_sgmii_pcs.v gem_sgmii_pcs.v
 vvp sim.vvp
-gtkwave tb_gem_sgmii_pcs.vcd &
+gtkwave tb_gem_sgmii_pcs.vcd tb_gem_sgmii_pcs.gtkw &
 ```
 **Key signals:** `sgmii_txd`, `sgmii_rxd`, `an_complete` — verify auto-negotiation
 
@@ -559,7 +559,7 @@ gtkwave tb_gem_sgmii_pcs.vcd &
 cd peripherals/pcie_pipe_if
 iverilog -g2012 -o sim.vvp tb_pcie_pipe_if.v pcie_pipe_if.v
 vvp sim.vvp
-gtkwave tb_pcie_pipe_if.vcd &
+gtkwave tb_pcie_pipe_if.vcd tb_pcie_pipe_if.gtkw &
 ```
 **Key signals:** `pipe_txdata`, `pipe_rxdata`, `pipe_txelecidle`, `pipe_rxstatus`
 
@@ -568,7 +568,7 @@ gtkwave tb_pcie_pipe_if.vcd &
 cd peripherals/pcie_top
 iverilog -g2012 -o sim.vvp tb_pcie_top.v pcie_top.v ../pcie_pipe_if/pcie_pipe_if.v
 vvp sim.vvp
-gtkwave tb_pcie_top.vcd &
+gtkwave tb_pcie_top.vcd tb_pcie_top.gtkw &
 ```
 **Key signals:** `tlp_type`, `tlp_data`, `completion_valid`, `dma_req`
 
@@ -581,7 +581,7 @@ gtkwave tb_pcie_top.vcd &
 cd security/drbg
 iverilog -g2012 -o sim.vvp tb_drbg.v drbg.v
 vvp sim.vvp
-gtkwave tb_drbg.vcd &
+gtkwave tb_drbg.vcd tb_drbg.gtkw &
 ```
 **Key signals:** `seed`, `generate`, `random_bits`, `reseed_req`
 
@@ -590,7 +590,7 @@ gtkwave tb_drbg.vcd &
 cd security/ecdsa_engine
 iverilog -g2012 -o sim.vvp tb_ecdsa_engine.v ecdsa_engine.v
 vvp sim.vvp
-gtkwave tb_ecdsa_engine.vcd &
+gtkwave tb_ecdsa_engine.vcd tb_ecdsa_engine.gtkw &
 ```
 **Key signals:** `private_key`, `public_key`, `signature_r`, `signature_s`, `verify_pass`
 
@@ -599,7 +599,7 @@ gtkwave tb_ecdsa_engine.vcd &
 cd security/envm_ctrl
 iverilog -g2012 -o sim.vvp tb_envm_ctrl.v envm_ctrl.v
 vvp sim.vvp
-gtkwave tb_envm_ctrl.vcd &
+gtkwave tb_envm_ctrl.vcd tb_envm_ctrl.gtkw &
 ```
 **Key signals:** `addr`, `data_out`, `program`, `erase`, `busy`
 
@@ -608,7 +608,7 @@ gtkwave tb_envm_ctrl.vcd &
 cd security/secure_boot
 iverilog -g2012 -o sim.vvp tb_secure_boot.v secure_boot.v
 vvp sim.vvp
-gtkwave tb_secure_boot.vcd &
+gtkwave tb_secure_boot.vcd tb_secure_boot.gtkw &
 ```
 **Key signals:** `boot_state`, `hash_match`, `boot_pass`, `boot_fail`
 
@@ -621,7 +621,7 @@ gtkwave tb_secure_boot.vcd &
 cd storage/mmc_controller
 iverilog -g2012 -o sim.vvp tb_mmc_controller.v mmc_controller.v
 vvp sim.vvp
-gtkwave tb_mmc_controller.vcd &
+gtkwave tb_mmc_controller.vcd tb_mmc_controller.gtkw &
 ```
 **Key signals:** `cmd`, `cmd_resp`, `data_out`, `data_in`, `card_detect`
 
@@ -630,7 +630,7 @@ gtkwave tb_mmc_controller.vcd &
 cd storage/qspi_controller
 iverilog -g2012 -o sim.vvp tb_qspi_controller.v qspi_controller.v
 vvp sim.vvp
-gtkwave tb_qspi_controller.vcd &
+gtkwave tb_qspi_controller.vcd tb_qspi_controller.gtkw &
 ```
 **Key signals:** `sclk`, `cs_n`, `io[3:0]`, `quad_mode`
 
@@ -639,7 +639,7 @@ gtkwave tb_qspi_controller.vcd &
 cd storage/usb_otg
 iverilog -g2012 -o sim.vvp tb_usb_otg.v usb_otg.v
 vvp sim.vvp
-gtkwave tb_usb_otg.vcd &
+gtkwave tb_usb_otg.vcd tb_usb_otg.gtkw &
 ```
 **Key signals:** `ulpi_data`, `ulpi_dir`, `ulpi_nxt`, `ulpi_stp`
 
@@ -652,7 +652,7 @@ gtkwave tb_usb_otg.vcd &
 cd video/mipi_csi2_rx
 iverilog -g2012 -o sim.vvp tb_mipi_csi2_rx.v mipi_csi2_rx.v
 vvp sim.vvp
-gtkwave tb_mipi_csi2_rx.vcd &
+gtkwave tb_mipi_csi2_rx.vcd tb_mipi_csi2_rx.gtkw &
 ```
 **Key signals:** `byte_data`, `data_type`, `line_valid`, `frame_valid`
 
@@ -661,7 +661,7 @@ gtkwave tb_mipi_csi2_rx.vcd &
 cd video/isp_pipeline
 iverilog -g2012 -o sim.vvp tb_isp_pipeline.v isp_pipeline.v
 vvp sim.vvp
-gtkwave tb_isp_pipeline.vcd &
+gtkwave tb_isp_pipeline.vcd tb_isp_pipeline.gtkw &
 ```
 **Key signals:** `pixel_in`, `pixel_out`, `r/g/b`, `demosaic_en`, `awb_gain`
 
@@ -670,7 +670,7 @@ gtkwave tb_isp_pipeline.vcd &
 cd video/hdmi_ctrl
 iverilog -g2012 -o sim.vvp tb_hdmi_ctrl.v hdmi_ctrl.v
 vvp sim.vvp
-gtkwave tb_hdmi_ctrl.vcd &
+gtkwave tb_hdmi_ctrl.vcd tb_hdmi_ctrl.gtkw &
 ```
 **Key signals:** `tmds_clk_p/n`, `tmds_data_p/n`, `pixel_data`, `hsync`, `vsync`, `de`
 
@@ -679,7 +679,7 @@ gtkwave tb_hdmi_ctrl.vcd &
 cd video/vdma
 iverilog -g2012 -o sim.vvp tb_vdma.v vdma.v
 vvp sim.vvp
-gtkwave tb_vdma.vcd &
+gtkwave tb_vdma.vcd tb_vdma.gtkw &
 ```
 **Key signals:** `src_addr`, `dst_addr`, `xfer_count`, `dma_done`, `axi_arvalid`
 
@@ -698,7 +698,7 @@ iverilog -g2012 -o sim.vvp -I ../../includes \
   ../ddr_scheduler/ddr_scheduler.v \
   ../../includes/stdcell_stubs.v
 vvp sim.vvp
-gtkwave tb_ddr_ctrl_top.vcd &
+gtkwave tb_ddr_ctrl_top.vcd tb_ddr_ctrl_top.gtkw &
 ```
 **Key signals:** All DDR4 pins + `cmd_type`, `state`, `bank_active`, `refresh_pending`
 
@@ -713,7 +713,7 @@ iverilog -g2012 -o sim.vvp -I ../../includes \
   ../l2_snoop_filter/l2_snoop_filter.v \
   ../../includes/stdcell_stubs.v
 vvp sim.vvp
-gtkwave tb_l2_cache_top.vcd &
+gtkwave tb_l2_cache_top.vcd tb_l2_cache_top.gtkw &
 ```
 **Key signals:** `axi_araddr`, `hit`, `miss`, `snoop_hit`, `invalidate`, `mesi_state`
 
@@ -740,7 +740,7 @@ iverilog -g2012 -o sim.vvp -I ../../includes \
   ../rv_debug/rv_debug.v \
   ../../includes/stdcell_stubs.v
 vvp sim.vvp
-gtkwave tb_rv_core_top.vcd &
+gtkwave tb_rv_core_top.vcd tb_rv_core_top.gtkw &
 ```
 **Key signals:** `pc`, `inst`, `priv_mode`, `alu_result`, `branch_taken`, `trap_valid`, `satp` — this is **the most critical simulation** — verify full instruction execution pipeline
 
@@ -843,7 +843,7 @@ iverilog -g2012 -o sim.vvp -I ../../includes \
   ../../video/vdma/vdma.v \
   ../../includes/stdcell_stubs.v
 vvp sim.vvp
-gtkwave tb_titan_x_top.vcd &
+gtkwave tb_titan_x_top.vcd tb_titan_x_top.gtkw &
 ```
 
 ---
@@ -863,7 +863,7 @@ iverilog -g2012 -o sim_ddr.vvp -I ../includes \
   ../memory/ddr_scheduler/ddr_scheduler.v \
   ../includes/stdcell_stubs.v
 vvp sim_ddr.vvp
-gtkwave tb_bfm_ddr4.vcd &
+gtkwave tb_bfm_ddr4.vcd tb_bfm_ddr4.gtkw &
 ```
 
 ### 71. GMII Ethernet BFM Integration
@@ -876,7 +876,7 @@ iverilog -g2012 -o sim_gmii.vvp -I ../includes \
   ../peripherals/gem_sgmii_pcs/gem_sgmii_pcs.v \
   ../includes/stdcell_stubs.v
 vvp sim_gmii.vvp
-gtkwave tb_bfm_gmii.vcd &
+gtkwave tb_bfm_gmii.vcd tb_bfm_gmii.gtkw &
 ```
 
 ### 72. PCIe BFM Integration
@@ -889,7 +889,7 @@ iverilog -g2012 -o sim_pcie.vvp -I ../includes \
   ../peripherals/pcie_pipe_if/pcie_pipe_if.v \
   ../includes/stdcell_stubs.v
 vvp sim_pcie.vvp
-gtkwave tb_bfm_pcie.vcd &
+gtkwave tb_bfm_pcie.vcd tb_bfm_pcie.gtkw &
 ```
 
 ### 73. MIPI CSI-2 BFM Integration
@@ -902,7 +902,7 @@ iverilog -g2012 -o sim_mipi.vvp -I ../includes \
   ../video/isp_pipeline/isp_pipeline.v \
   ../includes/stdcell_stubs.v
 vvp sim_mipi.vvp
-gtkwave tb_bfm_mipi.vcd &
+gtkwave tb_bfm_mipi.vcd tb_bfm_mipi.gtkw &
 ```
 
 ### 74. Memory Hierarchy Integration
@@ -920,7 +920,7 @@ iverilog -g2012 -o sim_memhier.vvp -I ../includes \
   ../memory/ddr_scheduler/ddr_scheduler.v \
   ../includes/stdcell_stubs.v
 vvp sim_memhier.vvp
-gtkwave tb_integ_memory_hierarchy.vcd &
+gtkwave tb_integ_memory_hierarchy.vcd tb_integ_memory_hierarchy.gtkw &
 ```
 
 ### 75. Peripheral Bus Integration
@@ -936,7 +936,7 @@ iverilog -g2012 -o sim_peribus.vvp -I ../includes \
   ../peripherals/rtc/rtc.v \
   ../includes/stdcell_stubs.v
 vvp sim_peribus.vvp
-gtkwave tb_integ_peripheral_bus.vcd &
+gtkwave tb_integ_peripheral_bus.vcd tb_integ_peripheral_bus.gtkw &
 ```
 
 ### 76. Security Chain Integration
@@ -953,7 +953,7 @@ iverilog -g2012 -o sim_sec.vvp -I ../includes \
   ../peripherals/trng/trng.v \
   ../includes/stdcell_stubs.v
 vvp sim_sec.vvp
-gtkwave tb_integ_security_chain.vcd &
+gtkwave tb_integ_security_chain.vcd tb_integ_security_chain.gtkw &
 ```
 
 ### 77. Video Pipeline Integration
@@ -967,7 +967,7 @@ iverilog -g2012 -o sim_video.vvp -I ../includes \
   ../video/vdma/vdma.v \
   ../includes/stdcell_stubs.v
 vvp sim_video.vvp
-gtkwave tb_integ_video_pipeline.vcd &
+gtkwave tb_integ_video_pipeline.vcd tb_integ_video_pipeline.gtkw &
 ```
 
 ### 78. Crossbar Concurrency Integration
@@ -979,7 +979,7 @@ iverilog -g2012 -o sim_xbar.vvp -I ../includes \
   ../interconnect/qos_controller/qos_controller.v \
   ../includes/stdcell_stubs.v
 vvp sim_xbar.vvp
-gtkwave tb_integ_xbar_concurrency.vcd &
+gtkwave tb_integ_xbar_concurrency.vcd tb_integ_xbar_concurrency.gtkw &
 ```
 
 ---
